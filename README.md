@@ -1,5 +1,7 @@
 # bevel
 
+[![CI](https://github.com/thadreber-web/bevel/actions/workflows/ci.yml/badge.svg)](https://github.com/thadreber-web/bevel/actions/workflows/ci.yml)
+
 A terminal coding agent for model servers you already run.
 
 bevel talks to **OpenAI-compatible endpoints only** — [vLLM](https://docs.vllm.ai/) and [llama.cpp](https://github.com/ggml-org/llama.cpp)'s `llama-server`. No API keys, no per-token billing, no code leaving your network.
