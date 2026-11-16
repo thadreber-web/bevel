@@ -91,7 +91,7 @@ asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 addopts = "-ra --strict-markers --strict-config"
 markers = [
-    "integration: requires a real model endpoint (deselected by default)",
+    "integration: requires a real model endpoint (skips unless one is configured)",
     "slow: slow enough to skip in the fast CI lane",
 ]
 filterwarnings = ["error::DeprecationWarning:bevel.*"]
