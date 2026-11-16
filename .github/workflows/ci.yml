@@ -1,0 +1,74 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Free tier is 2000 minutes/month; a Windows runner costs 2x. Cancel superseded
+# runs so a burst of pushes on one PR doesn't burn the month's allowance.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+env:
+  UV_LINK_MODE: copy
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-caching: true
+      - run: uv sync --frozen
+      - run: uv run ruff check --output-format=github .
+      - run: uv run ruff format --check .
+
+  typecheck:
+    name: Typecheck (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-caching: true
+      - run: uv sync --frozen
+      - run: uv run mypy
+
+  test:
+    name: Test (${{ matrix.os }}, py${{ matrix.python-version }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        # 3.11 is the floor we ship against and where the sandbox ctypes code
+        # is most likely to bite; 3.13 is what most contributors will run.
+        python-version: ['3.11', '3.13']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          enable-caching: true
+      - run: uv sync --frozen
+      # Integration tests need a real vLLM/llama.cpp endpoint and are
+      # deselected by marker; they run locally with `uv run pytest -m integration`.
+      - run: uv run pytest
+
+  # The evals lane arrives with m13, when there is a harness and a fixture repo
+  # to run. A job that selects an empty directory is a permanently green check
+  # that proves nothing, which is the failure mode this project exists to avoid.
