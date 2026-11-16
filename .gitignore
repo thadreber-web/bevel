@@ -18,6 +18,8 @@ htmlcov/
 # bevel runtime state
 .bevel/
 *.bevel.lock
+.env
+.env.*
 
 # Editors / OS
 .vscode/
