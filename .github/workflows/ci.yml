@@ -23,10 +23,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
-        with:
-          enable-caching: true
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.3.3
       - run: uv sync --frozen
       - run: uv run ruff check --output-format=github .
       - run: uv run ruff format --check .
@@ -40,10 +38,8 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest]
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
-        with:
-          enable-caching: true
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.3.3
       - run: uv sync --frozen
       - run: uv run mypy
 
@@ -59,11 +55,10 @@ jobs:
         # is most likely to bite; 3.13 is what most contributors will run.
         python-version: ['3.11', '3.13']
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.3.3
         with:
           python-version: ${{ matrix.python-version }}
-          enable-caching: true
       - run: uv sync --frozen
       # Integration tests need a real vLLM/llama.cpp endpoint and are
       # deselected by marker; they run locally with `uv run pytest -m integration`.
