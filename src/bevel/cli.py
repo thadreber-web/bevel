@@ -68,9 +68,10 @@ def _render_doctor(report: CapabilityReport) -> str:
         lines.append(f"    [{mark}] {cap.name:<17} {cap.detail}{suffix}")
     lines += [
         "",
-        "  Tier 2 (Windows Sandbox / bwrap) is opt-in via --untrusted-repo. It is not",
-        "  used for ordinary tool calls: a 10-30s cold start per command is unusable,",
-        "  and the container is disposable while an agent must write real edits.",
+        "  Tier 2 (Windows Sandbox / bwrap) is opt-in and is not used for ordinary",
+        "  tool calls: a 10-30s cold start per command is unusable, and the",
+        "  container is disposable while an agent must write real edits. It is",
+        "  enabled by config when m12 delivers the container backends.",
         "",
         "  Static probing only. bevel reports the enforcement level it *verified*,",
         "  which can be lower than 'best tier' above.",

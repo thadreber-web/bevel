@@ -13,12 +13,13 @@ and therefore trivially testable.
 from __future__ import annotations
 
 import ctypes
+import importlib
 import os
 import platform
 import shutil
 import sys
 from dataclasses import dataclass, field
-from typing import Final
+from typing import Any, Final
 
 #: Windows editions that ship Windows Sandbox. Home/SingleLanguage do not.
 _SANDBOX_CAPABLE_EDITIONS: Final[frozenset[str]] = frozenset(
@@ -150,10 +151,27 @@ def _probe_seccomp() -> Capability:
     return Capability("seccomp", True, f"actions: {', '.join(actions[:4])}")
 
 
-def _windows_edition() -> str | None:
+def _winreg() -> Any | None:
+    """The ``winreg`` module, or None off Windows.
+
+    Imported dynamically rather than with ``import winreg`` inside a
+    ``try``: typeshed guards ``winreg.pyi`` behind ``sys.platform ==
+    "win32"``, so on the Linux typecheck lane every attribute of a statically
+    imported ``winreg`` is an ``attr-defined`` error. Silencing that with
+    ``# type: ignore`` would then be an unused-ignore error on the Windows
+    lane, because strict mode checks those too. Going through
+    ``importlib.import_module`` keeps both lanes honest -- the module either
+    exists or it does not, and neither lane has to pretend.
+    """
     try:
-        import winreg  # noqa: PLC0415 -- Windows-only import
+        return importlib.import_module("winreg")
     except ImportError:
+        return None
+
+
+def _windows_edition() -> str | None:
+    winreg = _winreg()
+    if winreg is None:
         return None
 
     try:
@@ -172,9 +190,8 @@ def _windows_sandbox_service_installed() -> bool:
     Distinguishes a machine where the feature is enabled from one where the
     binaries are merely staged and ``WindowsSandbox.exe`` would fail to start.
     """
-    try:
-        import winreg  # noqa: PLC0415 -- Windows-only import
-    except ImportError:
+    winreg = _winreg()
+    if winreg is None:
         return False
 
     try:

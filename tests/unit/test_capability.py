@@ -170,6 +170,43 @@ class TestWindowsSandboxProbe:
         assert "Home" in cap.detail
 
 
+class TestWinregAccess:
+    """winreg is imported dynamically so the Linux typecheck lane can resolve it.
+
+    typeshed guards winreg.pyi behind sys.platform == "win32", so a static
+    `import winreg` is an attr-defined error on ubuntu and a `# type: ignore`
+    for it would be an unused-ignore error on windows. Dynamic import means
+    neither lane lies, but the degradation path now needs its own tests.
+    """
+
+    def test_missing_winreg_degrades_rather_than_raises(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        class FakeImportlib:
+            @staticmethod
+            def import_module(name: str) -> Any:
+                raise ImportError(name)
+
+        monkeypatch.setattr(_capability, "importlib", FakeImportlib())
+        assert _capability._winreg() is None
+        assert _capability._windows_edition() is None
+        assert _capability._windows_sandbox_service_installed() is False
+
+    def test_registry_failure_is_not_available(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A machine where the key read fails must not be reported as capable."""
+
+        class ExplodingWinreg:
+            HKEY_LOCAL_MACHINE = "HKLM"
+
+            @staticmethod
+            def OpenKey(*_args: Any) -> Any:
+                raise OSError(2, "file not found")
+
+        monkeypatch.setattr(_capability, "_winreg", ExplodingWinreg)
+        assert _capability._windows_sandbox_service_installed() is False
+        assert _capability._windows_edition() is None
+
+
 class TestRelease:
     def test_windows_reports_build_number(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """platform.release() says "10" on Windows 11, which identifies nothing."""
