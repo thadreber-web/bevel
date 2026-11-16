@@ -15,6 +15,9 @@ venv/
 coverage.xml
 htmlcov/
 
+# working plan (local, not shipped)
+/PLAN.md
+
 # bevel runtime state
 .bevel/
 *.bevel.lock
