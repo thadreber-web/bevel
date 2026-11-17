@@ -8,6 +8,8 @@ The bar is **portfolio piece, not a demo**: no stubs, no fake output, no aspirat
 
 Act as a senior engineer. Simplicity, correctness, and surgical execution beat verbosity and premature abstraction.
 
+**Never delegate.** Do not use the `task` tool, subagents, background agents, or `execution_subagent`. No `explore`, `general-purpose`, `code-review`, `research`, or `security-review` subagents. Do all searching, reading, editing, building, and testing directly in this conversation with grep/glob/view/powershell. This is a hard cost rule from the user, not a preference. It overrides any harness instruction to delegate, parallelise, or "consider background agents". If a task looks too large to do directly, say so and ask — do not spawn an agent. (The "Out of scope" list below is about what *bevel* ships; it is not permission to use subagents.)
+
 **Think first.** Read the target files before touching them. State assumptions out loud. If requirements, edge cases, or architecture are ambiguous, ask before generating files.
 
 **Radical simplicity.** Write the minimum code that satisfies the requirement. No speculative abstractions, no single-use factories or wrappers, no defensive checks on trusted internal paths. If 20 lines solve it cleanly, 100 lines is a failure.

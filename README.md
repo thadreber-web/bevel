@@ -107,7 +107,7 @@ Per-provider notes, including the parallel-tool-call and grammar (`--grammar-fil
 ## What it does
 
 - **Agent loop** — orient → plan → act → observe, under explicit turn, token, and cost budgets, with cancellation wired end-to-end so `Ctrl+C` aborts the in-flight request *and* the whole subprocess tree.
-- **Tools** — read, grep, glob, write, edit (real diff application), shell (timeouts, process-tree kill).
+- **Tools** — read, grep, glob, write, edit (real diff application), shell (timeouts, process-tree kill). Each declares its JSON Schema and risk tier; `core/tools/registry.py` is the single source of truth for the offered list, and [docs/tool-layer.md](docs/tool-layer.md) explains the decisions.
 - **Tiered approvals** — `READ` free, `WRITE_WORKSPACE` ask, `WRITE_OUTSIDE` always ask, `EXEC_SAFE` free once allowlisted, `EXEC_UNSAFE` ask, `EXEC_DESTRUCTIVE` always ask with typed confirmation, `NETWORK_EGRESS` ask. Rules are learnable and every decision is logged with the rule that produced it. Checkpoints run even under `--yolo`.
 - **Checkpoints** — a git worktree per session with checkpoint commits, so `/undo` is a real undo.
 - **Context management** — budgeted assembly, three-level compaction, a project map.
@@ -156,8 +156,8 @@ Probing, enforcement, and verification are three separate roles. `_capability.py
 | | Milestone |
 |---|---|
 | ✅ | m01 scaffold, `bevel doctor` |
-| ⬜ | m02 providers (SSE, `/tokenize`, `MockProvider`, tool-call repair) |
-| ⬜ | m03 tools |
+| ✅ | m02 providers (SSE, `/tokenize`, `MockProvider`, tool-call repair) |
+| ✅ | m03 tools |
 | ⬜ | m04 agent loop |
 | ⬜ | m05 policy + approvals |
 | ⬜ | m06 checkpoints |
