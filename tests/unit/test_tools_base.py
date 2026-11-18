@@ -7,6 +7,7 @@ runs, nothing raises into the loop, and a path cannot leave the workspace.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Any
 
@@ -76,8 +77,16 @@ class TestToolContext:
     def test_relative_paths_resolve_against_the_workspace(self, ctx: ToolContext) -> None:
         assert ctx.resolve("pkg/app.py") == ctx.workspace / "pkg" / "app.py"
 
-    def test_backslashes_are_accepted_on_any_platform(self, ctx: ToolContext) -> None:
+    @pytest.mark.skipif(os.name != "nt", reason="backslash is a path separator only on Windows")
+    def test_backslashes_are_accepted_as_separators_on_windows(self, ctx: ToolContext) -> None:
         assert ctx.resolve(r"pkg\app.py") == ctx.workspace / "pkg" / "app.py"
+
+    @pytest.mark.skipif(os.name == "nt", reason="backslash is an ordinary filename character here")
+    def test_backslashes_are_literal_filename_characters_on_posix(self, ctx: ToolContext) -> None:
+        # Not a separator on POSIX, so translating it would corrupt a legal
+        # filename. The model gets a separator-agnostic path only where the
+        # platform has one.
+        assert ctx.resolve(r"pkg\app.py") == ctx.workspace / "pkg\\app.py"
 
     def test_tilde_is_expanded(self, tmp_path: Path) -> None:
         context = ToolContext(workspace=tmp_path)
@@ -110,9 +119,18 @@ class TestToolContext:
         with pytest.raises(ToolError):
             ctx.require_within_workspace(str(other))
 
+    @pytest.mark.skipif(os.name != "nt", reason="POSIX paths are case-sensitive")
     def test_case_difference_does_not_escape_on_windows(self, ctx: ToolContext) -> None:
         inside = str(ctx.workspace / "a.py").upper()
         assert ctx.require_within_workspace(inside) == ctx.workspace / "a.py"
+
+    @pytest.mark.skipif(os.name == "nt", reason="Windows paths are case-insensitive")
+    def test_case_difference_is_a_different_file_on_posix(self, ctx: ToolContext) -> None:
+        # normcase is the identity here, so an upper-cased path really is a
+        # different file and the jail must refuse it rather than wave it in.
+        outside = str(ctx.workspace / "a.py").upper()
+        with pytest.raises(ToolError):
+            ctx.require_within_workspace(outside)
 
     def test_display_is_relative_inside_and_absolute_outside(self, ctx: ToolContext) -> None:
         assert ctx.display(ctx.workspace / "pkg" / "app.py") == "pkg/app.py"
