@@ -27,7 +27,20 @@ Act as a senior engineer. Simplicity, correctness, and surgical execution beat v
 
 **Be economical in chat.** Don't echo whole files back; show the diff or the target snippet. Skip preamble and polite closings. Target files precisely instead of running blanket directory scans when the targets are known.
 
-**One problem per session.** If the work branches or the scope expands, propose a fresh session rather than letting it sprawl. (The 14-milestone build order is the deliberate exception — treat each milestone as its own session-sized unit.)
+**One problem per session.** If the work branches or the scope expands, propose a fresh session rather than letting it sprawl. (The build order is the deliberate exception — treat each milestone, or each named slice of a split milestone, as its own session-sized unit.)
+
+## Session discipline
+
+These rules exist because a previous session stalled for hours looping on a red gate instead of surfacing. Stalling silently is a worse failure than a failing test.
+
+- **One milestone (or one named slice) per session.** If the work drifts to a second milestone, stop and propose a fresh session.
+- **Commit and push on every green gate.** Do not batch work locally. CI only runs on pushed commits, and two milestones of Linux-only test failures went unnoticed because nothing had been pushed since m02. A green local run is not a green run until CI agrees.
+- **Three distinct attempts per failing test, then stop and report.** Three *different hypotheses*, not three retries of the same edit. After three, present the evidence — the failure, what was tried, what it rules out — and ask. Do not enter a fourth.
+- **Twenty minutes without net progress → stop and show the state.** A short "here is what is blocking me" beats an hour of silent churn.
+- **Failing test first, where feasible.** "Done" should be a fact reported by the runner, not a judgement call.
+- **Read the governing instruction file before writing the code.** `.github/instructions/` maps paths to rules; policy and sandbox code has rules that are not guessable (probe false negatives, fail-closed semantics, which DLL exports are real).
+- **Verify platform behaviour on the real platform, don't reason it out.** POSIX path semantics are available locally through WSL; a `pathlib` or `normcase` assumption has already cost a CI cycle.
+- **Scope creep → propose a split, never push through.**
 
 ## Commands
 
