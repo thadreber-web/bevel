@@ -14,8 +14,8 @@ One iteration is:
 
 Steps 1, 7 and 8 are **seams**, not features. They are named in
 :data:`UNBUILT_SEAMS`, reported on every :class:`AgentResult`, and logged once per
-run. Nothing here pretends to enforce a policy, take a checkpoint, or compact a
-transcript.
+run. Nothing here pretends to take a checkpoint or compact a transcript. Policy
+(step 4) is enforced by :class:`~bevel.core.policy.PolicyEngine`.
 
 Cancellation
 ------------
@@ -45,13 +45,23 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
 from typing import Any, Final
 
+from bevel.config.schema import PolicyConfig
 from bevel.core.messages import Message, ToolCall
+from bevel.core.policy import (
+    Approver,
+    Decision,
+    PolicyEngine,
+    PolicyEvaluator,
+    PolicyRequest,
+    PolicyVerdict,
+    allow_all_policy,
+)
 from bevel.core.tools.base import RiskTier, Tool, ToolContext, ToolResult, call_tool
 from bevel.core.tools.registry import tools as builtin_tools
 from bevel.core.tools.types import ToolSpec
@@ -97,10 +107,6 @@ __all__ = [
 #: How many parallel-safe tool calls may be in flight at once.
 DEFAULT_CONCURRENCY: Final[int] = 4
 
-_SEAM_POLICY: Final[str] = (
-    "m05 (policy engine, rules, approvals, decision log) is not built: every tool call "
-    "is allowed and no decision is recorded anywhere"
-)
 _SEAM_CHECKPOINT: Final[str] = (
     "m06 (per-session worktree, checkpoint commits, /undo) is not built: writes land "
     "directly in the working tree and there is nothing to roll back to"
@@ -111,7 +117,7 @@ _SEAM_CONTEXT: Final[str] = (
 )
 
 #: What this loop does *not* do, in the words the loop itself reports.
-UNBUILT_SEAMS: Final[tuple[str, ...]] = (_SEAM_POLICY, _SEAM_CHECKPOINT, _SEAM_CONTEXT)
+UNBUILT_SEAMS: Final[tuple[str, ...]] = (_SEAM_CHECKPOINT, _SEAM_CONTEXT)
 
 DEFAULT_SYSTEM_PROMPT: Final[str] = (
     "You are bevel, a coding agent working in a local workspace.\n"
@@ -121,9 +127,10 @@ DEFAULT_SYSTEM_PROMPT: Final[str] = (
     'works unless you have run something that proves it. "Not built yet" is a correct '
     "answer; invented output is not.\n"
     "\n"
-    "Limits of this build: there is no policy engine, no approval prompt, and no "
-    "checkpointing (milestones m05 and m06). Every tool call you make is executed "
-    "immediately, including writes and shell commands."
+    "Limits of this build: there is no checkpointing (milestone m06), so a write cannot "
+    "be rolled back. Policy is enforced: reads and workspace writes proceed, and anything "
+    "the policy engine decides needs your approval is refused unless an approver is "
+    "installed. Say what you need instead of assuming you have it."
 )
 
 
@@ -200,40 +207,6 @@ class ToolExecution:
             f"Tool {self.call.name!r} was cancelled before it finished. It may have partially "
             "run; the result is unknown."
         )
-
-
-class Decision(StrEnum):
-    ALLOW = "allow"
-    DENY = "deny"
-
-
-@dataclass(frozen=True)
-class PolicyRequest:
-    """What a policy engine (m05) would be asked to judge."""
-
-    call: ToolCall
-    tool: Tool | None
-    name: str
-    arguments: Mapping[str, Any] | None
-
-
-@dataclass(frozen=True)
-class PolicyVerdict:
-    decision: Decision
-    reason: str = ""
-
-
-#: ``(request) -> verdict``. A DENY must carry a reason the model can act on.
-PolicyEvaluator = Callable[[PolicyRequest], PolicyVerdict]
-
-
-def allow_all_policy(request: PolicyRequest) -> PolicyVerdict:  # noqa: ARG001
-    """The m05 placeholder: allows everything, records nothing.
-
-    This is the seam, not the feature. :class:`Agent` wires it in when no evaluator is
-    supplied, and :data:`UNBUILT_SEAMS` says so on every result.
-    """
-    return PolicyVerdict(Decision.ALLOW, _SEAM_POLICY)
 
 
 @dataclass(frozen=True)
@@ -477,6 +450,8 @@ class Agent:
         concurrency: int = DEFAULT_CONCURRENCY,
         options: GenOptions | None = None,
         policy: PolicyEvaluator | None = None,
+        policy_config: PolicyConfig | None = None,
+        approver: Approver | None = None,
         on_checkpoint: CheckpointHook | None = None,
         repairer: ToolCallRepairer | None = None,
     ) -> None:
@@ -494,7 +469,11 @@ class Agent:
         self.tools: tuple[Tool, ...] = tuple(tools) if tools is not None else tuple(builtin_tools())
         self._by_name: dict[str, Tool] = {tool.spec.name: tool for tool in self.tools}
         self._repairer = repairer or ToolCallRepairer(provider)
-        self._policy: PolicyEvaluator = policy or allow_all_policy
+        self._policy: PolicyEvaluator = policy or PolicyEngine(
+            self.ctx,
+            config=policy_config,
+            approver=approver,
+        )
         self._on_checkpoint: CheckpointHook = on_checkpoint or no_checkpoint
         self._semaphore = asyncio.Semaphore(concurrency)
         self._tool_tasks: set[asyncio.Task[ToolExecution]] = set()

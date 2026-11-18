@@ -6,7 +6,7 @@ A terminal coding agent for model servers you already run.
 
 bevel talks to **OpenAI-compatible endpoints only** — [vLLM](https://docs.vllm.ai/) and [llama.cpp](https://github.com/ggml-org/llama.cpp)'s `llama-server`. No API keys, no per-token billing, no code leaving your network.
 
-> **Status: under construction.** The scaffold, capability probing, and `bevel doctor` work today, as do the provider layer, the tool layer, and the agent loop — the loop is covered by tests run against a real vLLM endpoint. The TUI, policy engine, checkpoints, context management, memory, and sandbox arrive in m05–m10 — see [Build order](#build-order). `bevel` refuses to print a friendly lie about anything that isn't built yet: unimplemented subcommands exit non-zero and name the milestone that delivers them.
+> **Status: under construction.** The scaffold, capability probing, and `bevel doctor` work today, as do the provider layer, the tool layer, the agent loop, and the policy engine — the loop is covered by tests run against a real vLLM endpoint. The TUI, checkpoints, context management, memory, and sandbox arrive in m06–m10 — see [Build order](#build-order). `bevel` refuses to print a friendly lie about anything that isn't built yet: unimplemented subcommands exit non-zero and name the milestone that delivers them.
 
 ## Why this exists
 
@@ -159,7 +159,7 @@ Probing, enforcement, and verification are three separate roles. `_capability.py
 | ✅ | m02 providers (SSE, `/tokenize`, `MockProvider`, tool-call repair) |
 | ✅ | m03 tools |
 | ✅ | m04 agent loop |
-| ⬜ | m05 policy + approvals |
+| ✅ | m05 policy + approvals |
 | ⬜ | m06 checkpoints |
 | ⬜ | m07 TUI |
 | ⬜ | m08 context management + sessions |

@@ -334,17 +334,17 @@ async def test_an_unknown_tool_is_answered_not_hung(
 async def test_unbuilt_seams_are_reported_on_every_result(
     endpoint: ModelProvider, workspace: Path
 ) -> None:
-    """m05/m06/m08 are not built and the loop must say so on the way out.
+    """m06/m08 are not built and the loop must say so on the way out.
 
     This is the anti-fake guarantee: a caller that never reads the docs still learns
-    that nothing enforced policy, nothing checkpointed, and nothing compacted.
+    that nothing checkpointed and nothing compacted. Policy is enforced, so it is no
+    longer among the seams the loop reports.
     """
     agent = Agent(endpoint, workspace, budgets=Budgets(max_iterations=1), options=GEN)
     result = await agent.run("Say ok.")
 
     assert result.seams == UNBUILT_SEAMS
-    assert len(result.seams) == 3
-    assert any("m05" in seam for seam in result.seams)
+    assert len(result.seams) == 2
     assert any("m06" in seam for seam in result.seams)
     assert any("m08" in seam for seam in result.seams)
 

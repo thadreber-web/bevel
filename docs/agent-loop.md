@@ -1,9 +1,10 @@
 # The agent loop
 
 `core/agent.py` runs *orient → plan → act → observe* under explicit budgets, and is
-the piece every later milestone sits on. Policy (`core/policy/`), checkpoints
-(`core/checkpoint/`) and context management (`core/context/`) attach at the three
-seams named below; the loop itself stays agnostic of them.
+the piece every later milestone sits on. Policy (`core/policy/`) now decides every
+tool call; checkpoints (`core/checkpoint/`) and context management (`core/context/`)
+attach at the two seams named below. The loop stays agnostic of all three: it asks a
+`PolicyEvaluator` and records the verdict, without knowing what an engine is.
 
 ## Shape
 
@@ -47,6 +48,16 @@ budgets are enforced before the work starts. The token budget is checked *betwee
 iterations, so a run can overshoot by one completion — documented rather than
 papered over, and asserted in the tests.
 
+## Policy
+
+Every repaired tool call goes through `self._policy`, a `PolicyEvaluator` callable.
+The default is the real `PolicyEngine` from `core/policy/`: it classifies the call
+against its declared `RiskTier`, matches the argv against the built-in safe and
+destructive rule tables and the learned allowlist in `policy.db`, consults an
+`Approver` for anything that needs a human, and logs the decision together with the
+rule that produced it. `allow_all_policy` remains exported as a caller's explicit
+opt-out, not the default.
+
 ## Unbuilt seams
 
 `UNBUILT_SEAMS` is the list of capabilities the loop would use but does not have yet.
@@ -55,7 +66,6 @@ loop never fakes the behaviour it stands in for:
 
 | Seam | Arrives with |
 |---|---|
-| Policy evaluation and approvals | m05 |
 | Checkpoints | m06 |
 | Context management and compaction | m08 |
 

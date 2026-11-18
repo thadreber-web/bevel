@@ -30,10 +30,11 @@ read-only properties rather than attributes. That is deliberate: mypy rejects a
 `Final` class attribute against a mutable protocol attribute, and the tools are all
 `Final` on purpose.
 
-## Risk tiers are declarations, not enforcement
+## Risk tiers are declarations the policy engine acts on
 
-Tiers are declared honestly now so that m05 has something to enforce against.
-Nothing in m03 consults them. The table:
+Tiers are declared honestly, and `core/policy/` enforces them: the engine decides
+allow/ask/deny from the tier plus the argv, and a tool may not self-declare
+`EXEC_SAFE` or `EXEC_DESTRUCTIVE` — those come only from a rule match. The table:
 
 | tier | meaning |
 | --- | --- |
@@ -98,7 +99,7 @@ usable on a Windows dev machine without producing whole-file diffs.
 `command` is an **array**, never a string, and execution goes through
 `asyncio.create_subprocess_exec` with no `shell=True` anywhere. A model that wants
 a shell asks for `["cmd", "/c", "..."]` or `["sh", "-c", "..."]` explicitly and
-that intent is visible in the transcript and to the m05 policy engine. There is no
+that intent is visible in the transcript and to the policy engine. There is no
 path where an unquoted metacharacter is interpreted by accident.
 
 Timeouts default to 30 s, are clamped to 600 s. Output is capped at 32 KB by

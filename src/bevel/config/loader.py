@@ -27,6 +27,8 @@ from bevel.config.schema import (
     DEFAULT_TIMEOUT,
     Config,
     ConfigError,
+    PolicyConfig,
+    PolicyMode,
     ProfileConfig,
 )
 
@@ -36,6 +38,10 @@ CONFIG_DIRNAME = "bevel"
 CONFIG_FILENAME = "config.toml"
 PROJECT_FILENAME = "bevel.toml"
 CAPABILITY_CACHE_FILENAME = "capabilities.json"
+POLICY_DB_FILENAME = "policy.db"
+
+_POLICY_KEYS = frozenset({"mode", "db_path", "allow", "deny"})
+_POLICY_MODES = tuple(mode.value for mode in PolicyMode)
 
 _PROFILE_KEYS = frozenset(
     {
@@ -68,6 +74,11 @@ def cache_home() -> Path:
 
 def capability_cache_path() -> Path:
     return cache_home() / CAPABILITY_CACHE_FILENAME
+
+
+def policy_db_path() -> Path:
+    """``~/.cache/bevel/policy.db`` -- learned allowlist and decision log."""
+    return cache_home() / POLICY_DB_FILENAME
 
 
 def candidate_files(
@@ -109,6 +120,7 @@ def load(
     profiles: dict[str, dict[str, Any]] = {}
     sources: list[Path] = []
 
+    policy_raw: dict[str, Any] = {}
     for path in candidate_files(cwd, explicit=explicit_file, env=environ):
         if not path.is_file():
             continue
@@ -118,6 +130,7 @@ def load(
             raise
         sources.append(path)
         _merge_profiles(profiles, data, path)
+        _merge_policy(policy_raw, data, path)
 
     _apply_env(profiles, environ)
 
@@ -130,7 +143,12 @@ def load(
         raise ConfigError(
             f"default profile {default!r} is not defined (defined: {', '.join(sorted(built))})"
         )
-    return Config(profiles=built, default_profile=default, sources=tuple(sources))
+    return Config(
+        profiles=built,
+        default_profile=default,
+        sources=tuple(sources),
+        policy=_build_policy(policy_raw),
+    )
 
 
 def _read_toml(path: Path) -> dict[str, Any]:
@@ -159,6 +177,57 @@ def _merge_profiles(target: dict[str, dict[str, Any]], data: dict[str, Any], pat
                 f"expected one of {', '.join(sorted(_PROFILE_KEYS))}"
             )
         target.setdefault(name, {}).update(raw)
+
+
+def _merge_policy(target: dict[str, Any], data: dict[str, Any], path: Path) -> None:
+    """Fold one file's ``[policy]`` table into ``target``, validating as it goes.
+
+    Validated per file rather than once at the end so the error names the file
+    that actually contains the mistake. Later files replace earlier values key by
+    key, which is how a project ``bevel.toml`` pins the mode without restating
+    the user's allowlist.
+    """
+    section = data.get("policy")
+    if section is None:
+        return
+    if not isinstance(section, dict):
+        raise ConfigError(f"{path}: [policy] must be a table")
+    unknown = set(section) - _POLICY_KEYS
+    if unknown:
+        raise ConfigError(
+            f"{path}: [policy] has unknown key(s) {', '.join(sorted(unknown))}; "
+            f"expected one of {', '.join(sorted(_POLICY_KEYS))}"
+        )
+    if "mode" in section:
+        mode = section["mode"]
+        if not isinstance(mode, str) or mode not in _POLICY_MODES:
+            raise ConfigError(
+                f"{path}: [policy] mode must be one of {', '.join(_POLICY_MODES)}, got {mode!r}"
+            )
+        target["mode"] = mode
+    if "db_path" in section:
+        raw = section["db_path"]
+        if not isinstance(raw, str) or not raw.strip():
+            raise ConfigError(f"{path}: [policy] db_path must be a non-empty string")
+        target["db_path"] = Path(raw).expanduser()
+    for key in ("allow", "deny"):
+        if key not in section:
+            continue
+        value = section[key]
+        if not isinstance(value, list) or not all(
+            isinstance(item, str) and item.strip() for item in value
+        ):
+            raise ConfigError(f"{path}: [policy] {key} must be a list of non-empty strings")
+        target[key] = tuple(value)
+
+
+def _build_policy(raw: dict[str, Any]) -> PolicyConfig:
+    return PolicyConfig(
+        mode=PolicyMode(raw.get("mode", PolicyMode.AUTO)),
+        db_path=raw.get("db_path"),
+        allow=raw.get("allow", ()),
+        deny=raw.get("deny", ()),
+    )
 
 
 def _apply_env(profiles: dict[str, dict[str, Any]], env: dict[str, str]) -> None:
@@ -295,4 +364,5 @@ __all__ = [
     "capability_cache_path",
     "config_home",
     "load",
+    "policy_db_path",
 ]

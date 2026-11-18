@@ -8,10 +8,41 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
+from enum import StrEnum
 from pathlib import Path
 
 DEFAULT_TIMEOUT = 120.0
 DEFAULT_CONNECT_TIMEOUT = 10.0
+
+
+class PolicyMode(StrEnum):
+    """How much the engine is allowed to decide without asking.
+
+    ``auto`` is the default because bevel is a coding agent that has to write
+    files to be useful; it still asks for everything above a workspace write.
+    ``ask`` makes even workspace writes require approval.
+    """
+
+    AUTO = "auto"
+    ASK = "ask"
+
+
+@dataclass(frozen=True)
+class PolicyConfig:
+    """The ``[policy]`` section: mode, extra rules, and where they are stored.
+
+    ``allow`` and ``deny`` are command prefixes written the way you'd type them
+    (``"git push"``, ``"rm -rf"``) and are matched against normalised argv.
+    They extend the built-in tables; they cannot override them downwards, so an
+    ``allow`` entry can never make a destructive command free.
+    """
+
+    mode: PolicyMode = PolicyMode.AUTO
+    #: Path to ``policy.db``. ``None`` means ``~/.cache/bevel/policy.db``, the
+    #: same cache directory the capability probe uses.
+    db_path: Path | None = None
+    allow: tuple[str, ...] = ()
+    deny: tuple[str, ...] = ()
 
 
 class ConfigError(Exception):
@@ -62,13 +93,14 @@ class ProfileConfig:
 
 @dataclass(frozen=True)
 class Config:
-    """Everything bevel needs to reach a model."""
+    """Everything bevel needs to reach a model, and how much to allow itself."""
 
     profiles: dict[str, ProfileConfig]
     default_profile: str
     #: Where the layers that produced this config were actually found, in
     #: increasing precedence. Reported by ``bevel doctor``.
     sources: tuple[Path, ...] = ()
+    policy: PolicyConfig = field(default_factory=PolicyConfig)
 
     def profile(self, name: str | None = None) -> ProfileConfig:
         key = name or self.default_profile

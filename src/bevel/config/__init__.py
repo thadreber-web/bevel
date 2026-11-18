@@ -12,16 +12,20 @@ from bevel.config.loader import (
     capability_cache_path,
     config_home,
     load,
+    policy_db_path,
 )
-from bevel.config.schema import Config, ConfigError, ProfileConfig
+from bevel.config.schema import Config, ConfigError, PolicyConfig, PolicyMode, ProfileConfig
 
 __all__ = [
     "Config",
     "ConfigError",
+    "PolicyConfig",
+    "PolicyMode",
     "ProfileConfig",
     "cache_home",
     "candidate_files",
     "capability_cache_path",
     "config_home",
     "load",
+    "policy_db_path",
 ]
