@@ -2,9 +2,10 @@
 
 `core/agent.py` runs *orient → plan → act → observe* under explicit budgets, and is
 the piece every later milestone sits on. Policy (`core/policy/`) now decides every
-tool call; checkpoints (`core/checkpoint/`) and context management (`core/context/`)
-attach at the two seams named below. The loop stays agnostic of all three: it asks a
-`PolicyEvaluator` and records the verdict, without knowing what an engine is.
+tool call, and checkpoints (`core/checkpoint/`) snapshot the workspace before the
+first write. Context management (`core/context/`) still attaches at the one seam
+named below. The loop stays agnostic of all three: it asks a `PolicyEvaluator` and
+records the verdict, without knowing what an engine is.
 
 ## Shape
 
@@ -66,11 +67,12 @@ loop never fakes the behaviour it stands in for:
 
 | Seam | Arrives with |
 |---|---|
-| Checkpoints | m06 |
 | Context management and compaction | m08 |
 
-A `CHECKPOINT` event is emitted only when a tool actually mutated the workspace, and
-its text says plainly that no checkpoint was taken.
+A `CHECKPOINT` event is emitted once per run, before the first batch that writes to the
+workspace. Its text is the truth of what happened: either the session's checkpoint
+commit, or `no checkpoint taken: <reason>` when the workspace is not a git repository,
+git is missing, or the commit failed.
 
 ## Testing against the real endpoint
 

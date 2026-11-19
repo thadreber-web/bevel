@@ -33,6 +33,7 @@ for a novel.
 from __future__ import annotations
 
 import asyncio
+import subprocess
 import time
 from collections.abc import Awaitable, Callable, Mapping
 from pathlib import Path
@@ -50,6 +51,7 @@ from bevel.core.agent import (
     StopReason,
     ToolOutcome,
 )
+from bevel.core.checkpoint import list_checkpoints
 from bevel.core.tools.base import RiskTier, ToolContext, ToolResult
 from bevel.core.tools.types import ToolSpec
 from bevel.providers.base import GenOptions, ModelProvider
@@ -156,11 +158,38 @@ def _assert_transcript_is_wellformed(result: AgentResult) -> None:
 
 @pytest.fixture
 def workspace(tmp_path: Path) -> Path:
-    """A throwaway workspace with one file whose only purpose is to be read."""
+    """A throwaway git repo with one file whose only purpose is to be read.
+
+    It is a repo because the agent takes a checkpoint commit before its first
+    write, and a checkpoint needs a repository with at least one commit. Pointing
+    the loop at a plain directory would exercise only the "no checkpoint taken"
+    failure path, which is not what this file is for.
+    """
     (tmp_path / "notes.txt").write_text(
         f"Meeting notes.\nAction items: none.\nThe access word is {SECRET}.\n",
         encoding="utf-8",
     )
+    for argv in (
+        ["init", "-q"],
+        ["add", "notes.txt"],
+        [
+            "-c",
+            "user.name=bevel",
+            "-c",
+            "user.email=bevel@localhost",
+            "commit",
+            "-q",
+            "-m",
+            "seed",
+        ],
+    ):
+        subprocess.run(
+            ["git", *argv],
+            cwd=tmp_path,
+            check=True,
+            capture_output=True,
+            timeout=30,
+        )
     return tmp_path
 
 
@@ -254,8 +283,9 @@ async def test_a_write_actually_changes_the_workspace(
 ) -> None:
     """The write path end to end: model invents arguments, tool validates, disk changes.
 
-    Also the only test that exercises the m06 checkpoint seam firing on a mutating
-    iteration -- the seam must announce itself rather than quietly do nothing.
+    Also the only test that exercises the checkpoint commit on a mutating run --
+    it must actually land on the ``bevel/checkpoint/<session>`` ref, not merely
+    announce itself.
     """
     _requires_tools(endpoint)
 
@@ -287,12 +317,13 @@ async def test_a_write_actually_changes_the_workspace(
     assert WRITTEN in created.read_text(encoding="utf-8")
 
     assert any(execution.mutated for execution in writes), (
-        "a successful write must be reported as a mutation, or m06 has nothing to "
-        "checkpoint and /undo has nothing to roll back"
+        "a successful write must be reported as a mutation, or the checkpoint "
+        "pre-flight has nothing to trigger on"
     )
     checkpoints = _events(result, AgentEventType.CHECKPOINT)
-    assert checkpoints, "a mutating iteration must emit a CHECKPOINT event"
-    assert "m06" in checkpoints[0].text, checkpoints[0].text
+    assert checkpoints, "a mutating run must emit a CHECKPOINT event"
+    assert checkpoints[0].text.startswith("checkpointed "), checkpoints[0].text
+    assert list_checkpoints(workspace), "the checkpoint commit never landed on its ref"
     _assert_transcript_is_wellformed(result)
 
 
@@ -334,18 +365,17 @@ async def test_an_unknown_tool_is_answered_not_hung(
 async def test_unbuilt_seams_are_reported_on_every_result(
     endpoint: ModelProvider, workspace: Path
 ) -> None:
-    """m06/m08 are not built and the loop must say so on the way out.
+    """m08 is not built and the loop must say so on the way out.
 
     This is the anti-fake guarantee: a caller that never reads the docs still learns
-    that nothing checkpointed and nothing compacted. Policy is enforced, so it is no
-    longer among the seams the loop reports.
+    that nothing compacted. Policy is enforced and checkpoints are taken, so neither
+    is among the seams the loop reports.
     """
     agent = Agent(endpoint, workspace, budgets=Budgets(max_iterations=1), options=GEN)
     result = await agent.run("Say ok.")
 
     assert result.seams == UNBUILT_SEAMS
-    assert len(result.seams) == 2
-    assert any("m06" in seam for seam in result.seams)
+    assert len(result.seams) == 1
     assert any("m08" in seam for seam in result.seams)
 
 

@@ -21,6 +21,7 @@ from ._capability import CapabilityReport, probe
 #: that delivers them. Kept in one place so ``--help`` and the stub message
 #: cannot drift apart.
 _PENDING: dict[str, str] = {
+    "undo": "m07 (Textual TUI); the restore API in bevel.core.checkpoint already works",
     "sessions": "m08 (session persistence and resume)",
     "resume": "m08 (session persistence and resume)",
     "memory": "m09 (long-term memory)",

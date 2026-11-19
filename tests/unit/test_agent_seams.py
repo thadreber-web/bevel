@@ -14,18 +14,18 @@ import pytest
 from bevel.core.agent import DEFAULT_SYSTEM_PROMPT, UNBUILT_SEAMS
 
 
-def test_unbuilt_seams_are_exactly_checkpoint_and_context() -> None:
-    assert len(UNBUILT_SEAMS) == 2, UNBUILT_SEAMS
-    assert any("m06" in seam for seam in UNBUILT_SEAMS), UNBUILT_SEAMS
+def test_unbuilt_seams_is_context_only() -> None:
+    assert len(UNBUILT_SEAMS) == 1, UNBUILT_SEAMS
     assert any("m08" in seam for seam in UNBUILT_SEAMS), UNBUILT_SEAMS
 
 
-@pytest.mark.parametrize("stale", ["m05", "policy", "approval"])
-def test_policy_is_no_longer_reported_as_unbuilt(stale: str) -> None:
-    """m05 shipped; the loop must stop disclaiming it.
+@pytest.mark.parametrize("stale", ["m05", "policy", "approval", "m06", "checkpoint"])
+def test_shipped_features_are_no_longer_reported_as_unbuilt(stale: str) -> None:
+    """m05 and m06 shipped; the loop must stop disclaiming them.
 
     A seam that outlives its milestone is worse than no seam at all: the model is
-    told there is no policy engine and stops expecting tool calls to be refused.
+    told there is no policy engine (or no way back) and stops expecting tool calls
+    to be refused, or a run to be undoable.
     """
     assert not any(stale in seam.lower() for seam in UNBUILT_SEAMS), (
         f"{stale!r} still appears in UNBUILT_SEAMS: {UNBUILT_SEAMS}"
@@ -36,3 +36,9 @@ def test_system_prompt_no_longer_denies_a_policy_engine() -> None:
     lowered = DEFAULT_SYSTEM_PROMPT.lower()
     assert "no policy engine" not in lowered, DEFAULT_SYSTEM_PROMPT
     assert "policy is enforced" in lowered, DEFAULT_SYSTEM_PROMPT
+
+
+def test_system_prompt_no_longer_denies_checkpointing() -> None:
+    lowered = DEFAULT_SYSTEM_PROMPT.lower()
+    assert "no checkpointing" not in lowered, DEFAULT_SYSTEM_PROMPT
+    assert "snapshotted" in lowered, DEFAULT_SYSTEM_PROMPT

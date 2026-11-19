@@ -8,14 +8,15 @@ One iteration is:
 4. evaluate each call against policy,
 5. execute — parallel where the tool says it is safe, capped, serial otherwise,
 6. append an observation for every call,
-7. checkpoint if anything mutated,
+7. checkpoint the workspace before the first batch that writes,
 8. compact if the context is over budget,
 9. repeat, until the model stops asking for tools or a budget runs out.
 
-Steps 1, 7 and 8 are **seams**, not features. They are named in
-:data:`UNBUILT_SEAMS`, reported on every :class:`AgentResult`, and logged once per
-run. Nothing here pretends to take a checkpoint or compact a transcript. Policy
-(step 4) is enforced by :class:`~bevel.core.policy.PolicyEngine`.
+Step 7 takes the session's checkpoint commit before the first batch that writes (see
+:mod:`bevel.core.checkpoint`). Steps 1 and 8 are **seams**, not features. They are
+named in :data:`UNBUILT_SEAMS`, reported on every :class:`AgentResult`, and logged
+once per run. Nothing here pretends to compact a transcript. Policy (step 4) is
+enforced by :class:`~bevel.core.policy.PolicyEngine`.
 
 Cancellation
 ------------
@@ -45,13 +46,15 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
+from collections.abc import AsyncIterator, Awaitable, Sequence
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
 from typing import Any, Final
 
 from bevel.config.schema import PolicyConfig
+from bevel.core.checkpoint import snapshot
 from bevel.core.messages import Message, ToolCall
 from bevel.core.policy import (
     Approver,
@@ -89,8 +92,6 @@ __all__ = [
     "AgentEventType",
     "AgentResult",
     "Budgets",
-    "CheckpointHook",
-    "CheckpointRequest",
     "CompactionStatus",
     "ContextState",
     "Decision",
@@ -101,23 +102,18 @@ __all__ = [
     "ToolExecution",
     "ToolOutcome",
     "allow_all_policy",
-    "no_checkpoint",
 ]
 
 #: How many parallel-safe tool calls may be in flight at once.
 DEFAULT_CONCURRENCY: Final[int] = 4
 
-_SEAM_CHECKPOINT: Final[str] = (
-    "m06 (per-session worktree, checkpoint commits, /undo) is not built: writes land "
-    "directly in the working tree and there is nothing to roll back to"
-)
 _SEAM_CONTEXT: Final[str] = (
     "m08 (context budgeting, L1/L2/L3 compaction, session persistence) is not built: "
     "the transcript is never summarised, truncated, or saved — it only grows"
 )
 
 #: What this loop does *not* do, in the words the loop itself reports.
-UNBUILT_SEAMS: Final[tuple[str, ...]] = (_SEAM_CHECKPOINT, _SEAM_CONTEXT)
+UNBUILT_SEAMS: Final[tuple[str, ...]] = (_SEAM_CONTEXT,)
 
 DEFAULT_SYSTEM_PROMPT: Final[str] = (
     "You are bevel, a coding agent working in a local workspace.\n"
@@ -127,8 +123,9 @@ DEFAULT_SYSTEM_PROMPT: Final[str] = (
     'works unless you have run something that proves it. "Not built yet" is a correct '
     "answer; invented output is not.\n"
     "\n"
-    "Limits of this build: there is no checkpointing (milestone m06), so a write cannot "
-    "be rolled back. Policy is enforced: reads and workspace writes proceed, and anything "
+    "Limits of this build: the workspace is snapshotted once before the first write, so "
+    "a run can be undone, but there is no per-step rollback and no undo command yet "
+    "(milestone m07). Policy is enforced: reads and workspace writes proceed, and anything "
     "the policy engine decides needs your approval is refused unless an approver is "
     "installed. Say what you need instead of assuming you have it."
 )
@@ -207,25 +204,6 @@ class ToolExecution:
             f"Tool {self.call.name!r} was cancelled before it finished. It may have partially "
             "run; the result is unknown."
         )
-
-
-@dataclass(frozen=True)
-class CheckpointRequest:
-    """What a checkpoint hook (m06) would be handed after a mutating iteration."""
-
-    iteration: int
-    mutated: tuple[str, ...]
-
-
-CheckpointHook = Callable[[CheckpointRequest], Awaitable[None]]
-
-
-async def no_checkpoint(request: CheckpointRequest) -> None:
-    """The m06 placeholder: does nothing at all.
-
-    Named rather than omitted so that the absence of checkpointing is a decision
-    visible in the code, the event stream, and the result.
-    """
 
 
 class CompactionStatus(StrEnum):
@@ -452,7 +430,6 @@ class Agent:
         policy: PolicyEvaluator | None = None,
         policy_config: PolicyConfig | None = None,
         approver: Approver | None = None,
-        on_checkpoint: CheckpointHook | None = None,
         repairer: ToolCallRepairer | None = None,
     ) -> None:
         if budgets.max_iterations < 1:
@@ -474,7 +451,8 @@ class Agent:
             config=policy_config,
             approver=approver,
         )
-        self._on_checkpoint: CheckpointHook = on_checkpoint or no_checkpoint
+        self._checkpoint_session = f"{self.ctx.workspace.name}-{datetime.now(UTC):%Y%m%dT%H%M%S}"
+        self._checkpointed = False
         self._semaphore = asyncio.Semaphore(concurrency)
         self._tool_tasks: set[asyncio.Task[ToolExecution]] = set()
         self._cancel_event = asyncio.Event()
@@ -674,6 +652,20 @@ class Agent:
             state.messages.append(Message.tool_result(execution.call.id, execution.observation))
 
         schedulable = [item for item in pending if item.outcome is None]
+        if not self._checkpointed and any(
+            item.tool is not None and item.tool.risk_tier is RiskTier.WRITE_WORKSPACE
+            for item in schedulable
+        ):
+            self._checkpointed = True
+            result = await snapshot(self.ctx.workspace, self._checkpoint_session)
+            if not result.ok:
+                logger.warning("checkpoint failed: %s", result.error)
+            yield AgentEvent(
+                AgentEventType.CHECKPOINT,
+                iteration=state.iterations,
+                text=result.summary if result.ok else str(result.error),
+            )
+
         async for batch in self._execute(schedulable):
             executions.extend(batch)
             for execution in batch:
@@ -684,15 +676,6 @@ class Agent:
                 )
                 state.messages.append(Message.tool_result(execution.call.id, execution.observation))
         state.tool_calls += len(pending)
-
-        mutated = tuple(sorted({execution.name for execution in executions if execution.mutated}))
-        if mutated:
-            await self._on_checkpoint(CheckpointRequest(state.iterations, mutated))
-            yield AgentEvent(
-                AgentEventType.CHECKPOINT,
-                iteration=state.iterations,
-                text=f"no checkpoint taken ({_SEAM_CHECKPOINT}): {', '.join(mutated)}",
-            )
 
         context = totals.context_state(self.provider.capabilities.max_model_len)
         yield AgentEvent(

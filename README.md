@@ -6,7 +6,7 @@ A terminal coding agent for model servers you already run.
 
 bevel talks to **OpenAI-compatible endpoints only** — [vLLM](https://docs.vllm.ai/) and [llama.cpp](https://github.com/ggml-org/llama.cpp)'s `llama-server`. No API keys, no per-token billing, no code leaving your network.
 
-> **Status: under construction.** The scaffold, capability probing, and `bevel doctor` work today, as do the provider layer, the tool layer, the agent loop, and the policy engine — the loop is covered by tests run against a real vLLM endpoint. The TUI, checkpoints, context management, memory, and sandbox arrive in m06–m10 — see [Build order](#build-order). `bevel` refuses to print a friendly lie about anything that isn't built yet: unimplemented subcommands exit non-zero and name the milestone that delivers them.
+> **Status: under construction.** The scaffold, capability probing, and `bevel doctor` work today, as do the provider layer, the tool layer, the agent loop, the policy engine, and checkpoints — the loop is covered by tests run against a real vLLM endpoint. The TUI, context management, memory, and sandbox arrive in m07–m12 — see [Build order](#build-order). `bevel` refuses to print a friendly lie about anything that isn't built yet: unimplemented subcommands exit non-zero and name the milestone that delivers them.
 
 ## Why this exists
 
@@ -109,7 +109,7 @@ Per-provider notes, including the parallel-tool-call and grammar (`--grammar-fil
 - **Agent loop** — orient → plan → act → observe, under explicit iteration, tool-call, and token budgets, with cancellation wired end-to-end: `cancel()` abandons the in-flight request *and* the tool tasks, which for the shell tool means the whole process tree. `core/agent.py` is covered by tests run against a real endpoint, and [docs/agent-loop.md](docs/agent-loop.md) explains the decisions.
 - **Tools** — read, grep, glob, write, edit (real diff application), shell (timeouts, process-tree kill). Each declares its JSON Schema and risk tier; `core/tools/registry.py` is the single source of truth for the offered list, and [docs/tool-layer.md](docs/tool-layer.md) explains the decisions.
 - **Tiered approvals** — `READ` free, `WRITE_WORKSPACE` ask, `WRITE_OUTSIDE` always ask, `EXEC_SAFE` free once allowlisted, `EXEC_UNSAFE` ask, `EXEC_DESTRUCTIVE` always ask with typed confirmation, `NETWORK_EGRESS` ask. Rules are learnable and every decision is logged with the rule that produced it. Checkpoints run even under `--yolo`.
-- **Checkpoints** — a git worktree per session with checkpoint commits, so `/undo` is a real undo.
+- **Checkpoints** — the working tree, uncommitted work-in-progress included, is committed to a `bevel/checkpoint/<session>` ref before the agent's first write, and `bevel.core.checkpoint.restore()` rewinds it. `bevel undo` arrives with the TUI in m07.
 - **Context management** — budgeted assembly, three-level compaction, a project map.
 - **Memory** — SQLite FTS5 from the standard library, plus optional vector recall over your server's `/embeddings`.
 - **MCP** — hand-rolled JSON-RPC over stdio and streamable-HTTP, implementing the subset that matters.
@@ -142,7 +142,7 @@ src/bevel/
   core/context/     budgeting, compaction, project map
   core/policy/      tiered engine, rules, approvals, decision log
   core/sandbox/     T0/T1/T2 backends + self-test
-  core/checkpoint/  worktrees, checkpoint commits, /undo
+  core/checkpoint/  session snapshot commit on a side ref, restore API
   core/session/     SQLite: turns, tool calls, token + cost accounting
   core/memory/      FTS5 + optional vector recall
   mcp/  evals/  tui/  render/

@@ -87,7 +87,7 @@ src/bevel/
   core/context/     budgeting, 3-level compaction, project map
   core/policy/      tiered engine, rules, approvals, decision log
   core/sandbox/     T0/T1/T2 backends + self-test
-  core/checkpoint/  git worktree per session, checkpoint commits, /undo
+  core/checkpoint/  session snapshot commit on a side ref, restore API
   core/session/     SQLite: turns, tool calls, token + cost accounting
   core/memory/      FTS5 + optional vector recall
   mcp/  evals/  tui/  render/
@@ -96,7 +96,7 @@ tests/{unit,integration,tui,evals}/
 
 ## The agent loop
 
-Each iteration: assemble context under budget → stream a completion → parse tool calls **through the repair layer** → evaluate every call against the policy engine → request approvals above the call's tier → execute (parallel where safe, `asyncio.gather` with a concurrency cap) → append observations → checkpoint if anything mutated → compact if over budget → repeat.
+Each iteration: assemble context under budget → stream a completion → parse tool calls **through the repair layer** → evaluate every call against the policy engine → request approvals above the call's tier → take the session's checkpoint commit before the first batch that writes → execute (parallel where safe, `asyncio.gather` with a concurrency cap) → append observations → compact if over budget → repeat.
 
 Cancellation is wired end-to-end. `Ctrl+C` aborts the in-flight HTTP request *and* the whole subprocess tree, not just the parent.
 
