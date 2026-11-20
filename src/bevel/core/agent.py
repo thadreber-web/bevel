@@ -732,7 +732,7 @@ class Agent:
                     "repaired tool call %s (%s): %s", call.id, call.name, ", ".join(outcome.fixes)
                 )
 
-            verdict = self._policy(PolicyRequest(call, tool, call.name, outcome.arguments))
+            verdict = await self._policy(PolicyRequest(call, tool, call.name, outcome.arguments))
             if verdict.decision is Decision.DENY:
                 pending.append(
                     _Pending(

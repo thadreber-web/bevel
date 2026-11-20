@@ -52,7 +52,7 @@ class RecordingApprover:
         self.approval = approval
         self.requests: list[ApprovalRequest] = []
 
-    def approve(self, request: ApprovalRequest) -> Approval:
+    async def approve(self, request: ApprovalRequest) -> Approval:
         self.requests.append(request)
         return self.approval
 
@@ -101,307 +101,327 @@ def engines(ctx: ToolContext, tmp_path: Path) -> Iterator[Callable[..., PolicyEn
 
 
 class TestTierContract:
-    def test_reads_are_free(self, engines: Callable[..., PolicyEngine]) -> None:
+    async def test_reads_are_free(self, engines: Callable[..., PolicyEngine]) -> None:
         engine = engines(approver=DenyAllApprover())
-        verdict = engine(_write(RiskTier.READ, "a.py"))
+        verdict = await engine(_write(RiskTier.READ, "a.py"))
         assert verdict.decision is Decision.ALLOW
         assert engine.decisions()[0].rule == "tier:read"
 
-    def test_workspace_writes_are_free_in_auto_mode(
+    async def test_workspace_writes_are_free_in_auto_mode(
         self, engines: Callable[..., PolicyEngine]
     ) -> None:
         engine = engines(mode=PolicyMode.AUTO, approver=DenyAllApprover())
-        assert engine(_write()).decision is Decision.ALLOW
+        assert (await engine(_write())).decision is Decision.ALLOW
         assert engine.decisions()[0].rule == "mode:auto"
 
-    def test_workspace_writes_ask_in_ask_mode(self, engines: Callable[..., PolicyEngine]) -> None:
+    async def test_workspace_writes_ask_in_ask_mode(
+        self, engines: Callable[..., PolicyEngine]
+    ) -> None:
         engine = engines(mode=PolicyMode.ASK, approver=DenyAllApprover())
-        assert engine(_write()).decision is Decision.DENY
+        assert (await engine(_write())).decision is Decision.DENY
         assert engine.decisions()[0].rule == "approver:tier:write_workspace"
 
-    def test_an_escaping_path_always_asks(self, engines: Callable[..., PolicyEngine]) -> None:
+    async def test_an_escaping_path_always_asks(self, engines: Callable[..., PolicyEngine]) -> None:
         for mode in PolicyMode:
             engine = engines(mode=mode, approver=DenyAllApprover())
-            verdict = engine(_write(path="../out.py"))
+            verdict = await engine(_write(path="../out.py"))
             assert verdict.decision is Decision.DENY
             assert engine.decisions()[0].rule == "approver:path-jail"
 
-    def test_a_write_outside_tool_always_asks(self, engines: Callable[..., PolicyEngine]) -> None:
+    async def test_a_write_outside_tool_always_asks(
+        self, engines: Callable[..., PolicyEngine]
+    ) -> None:
         for mode in PolicyMode:
             engine = engines(mode=mode, approver=DenyAllApprover())
-            verdict = engine(_write(RiskTier.WRITE_OUTSIDE))
+            verdict = await engine(_write(RiskTier.WRITE_OUTSIDE))
             assert verdict.decision is Decision.DENY
             assert engine.decisions()[0].rule == "approver:tier:write_outside"
 
-    def test_network_egress_asks(self, engines: Callable[..., PolicyEngine]) -> None:
+    async def test_network_egress_asks(self, engines: Callable[..., PolicyEngine]) -> None:
         engine = engines(mode=PolicyMode.AUTO, approver=DenyAllApprover())
-        verdict = engine(_request(FakeTool(RiskTier.NETWORK_EGRESS, "fetch"), arguments={}))
+        verdict = await engine(_request(FakeTool(RiskTier.NETWORK_EGRESS, "fetch"), arguments={}))
         assert verdict.decision is Decision.DENY
         assert engine.decisions()[0].rule == "approver:tier:network_egress"
 
-    def test_auto_mode_relaxes_workspace_writes_only(
+    async def test_auto_mode_relaxes_workspace_writes_only(
         self, engines: Callable[..., PolicyEngine]
     ) -> None:
         """Auto mode is not a yolo switch: the always-ask tiers still ask."""
         engine = engines(mode=PolicyMode.AUTO, approver=DenyAllApprover())
-        engine(_write(RiskTier.WRITE_OUTSIDE))
+        await engine(_write(RiskTier.WRITE_OUTSIDE))
         assert engine.decisions()[0].rule == "approver:tier:write_outside"
-        engine(_write(path="../out.py"))
+        await engine(_write(path="../out.py"))
         assert engine.decisions()[0].rule == "approver:path-jail"
 
 
 class TestExecRules:
-    def test_an_allowlisted_command_runs_unasked(
+    async def test_an_allowlisted_command_runs_unasked(
         self, engines: Callable[..., PolicyEngine]
     ) -> None:
         engine = engines(approver=DenyAllApprover())
-        verdict = engine(_shell(["git", "status", "--short"]))
+        verdict = await engine(_shell(["git", "status", "--short"]))
         assert verdict.decision is Decision.ALLOW
         record = engine.decisions()[0]
         assert record.rule == "allowlist:git status"
         assert record.tier is RiskTier.EXEC_SAFE
 
-    def test_a_command_string_is_matched_as_data(
+    async def test_a_command_string_is_matched_as_data(
         self, engines: Callable[..., PolicyEngine]
     ) -> None:
         engine = engines(approver=DenyAllApprover())
-        assert engine(_shell("git status --short")).decision is Decision.ALLOW
+        assert (await engine(_shell("git status --short"))).decision is Decision.ALLOW
 
-    def test_an_unlisted_command_asks(self, engines: Callable[..., PolicyEngine]) -> None:
+    async def test_an_unlisted_command_asks(self, engines: Callable[..., PolicyEngine]) -> None:
         engine = engines(approver=DenyAllApprover())
-        assert engine(_shell(["pytest", "-q"])).decision is Decision.DENY
+        assert (await engine(_shell(["pytest", "-q"]))).decision is Decision.DENY
         assert engine.decisions()[0].rule == "approver:tier:exec_unsafe"
 
-    def test_a_config_allow_pattern_makes_a_command_free(
+    async def test_a_config_allow_pattern_makes_a_command_free(
         self, engines: Callable[..., PolicyEngine]
     ) -> None:
         engine = engines(allow=("pytest",), approver=DenyAllApprover())
-        assert engine(_shell(["pytest", "-q", "tests/unit"])).decision is Decision.ALLOW
+        assert (await engine(_shell(["pytest", "-q", "tests/unit"]))).decision is Decision.ALLOW
         assert engine.decisions()[0].rule == "allowlist:pytest"
 
-    def test_a_config_deny_pattern_beats_the_allowlist(
+    async def test_a_config_deny_pattern_beats_the_allowlist(
         self, engines: Callable[..., PolicyEngine]
     ) -> None:
         engine = engines(allow=("git",), deny=("git status",), approver=DenyAllApprover())
-        assert engine(_shell(["git", "status"])).decision is Decision.DENY
+        assert (await engine(_shell(["git", "status"]))).decision is Decision.DENY
         assert engine.decisions()[0].rule == "config:deny:git status"
 
-    def test_a_deny_pattern_refuses_without_asking(
+    async def test_a_deny_pattern_refuses_without_asking(
         self, engines: Callable[..., PolicyEngine]
     ) -> None:
         approver = RecordingApprover(Approval(Decision.ALLOW))
         engine = engines(deny=("git status",), approver=approver)
-        engine(_shell(["git", "status"]))
+        await engine(_shell(["git", "status"]))
         assert approver.requests == []
 
-    def test_a_destructive_command_always_asks(self, engines: Callable[..., PolicyEngine]) -> None:
+    async def test_a_destructive_command_always_asks(
+        self, engines: Callable[..., PolicyEngine]
+    ) -> None:
         engine = engines(mode=PolicyMode.AUTO, approver=DenyAllApprover())
-        assert engine(_shell(["rm", "-rf", "build"])).decision is Decision.DENY
+        assert (await engine(_shell(["rm", "-rf", "build"]))).decision is Decision.DENY
         record = engine.decisions()[0]
         assert record.rule == "approver:builtin:rm recursive force"
         assert record.tier is RiskTier.EXEC_DESTRUCTIVE
 
-    def test_a_learned_rule_cannot_make_a_destructive_command_free(
+    async def test_a_learned_rule_cannot_make_a_destructive_command_free(
         self, engines: Callable[..., PolicyEngine]
     ) -> None:
         engine = engines(approver=DenyAllApprover())
         engine.remember(["git", "reset"])
-        assert engine(_shell(["git", "reset", "--hard", "HEAD~1"])).decision is Decision.DENY
+        assert (
+            await engine(_shell(["git", "reset", "--hard", "HEAD~1"]))
+        ).decision is Decision.DENY
         assert engine.decisions()[0].rule == "approver:builtin:git reset --hard"
 
-    def test_a_learned_rule_makes_an_ordinary_command_free(
+    async def test_a_learned_rule_makes_an_ordinary_command_free(
         self, engines: Callable[..., PolicyEngine]
     ) -> None:
         engine = engines(approver=DenyAllApprover())
         engine.remember(["pytest"])
-        assert engine(_shell(["pytest", "-q"])).decision is Decision.ALLOW
+        assert (await engine(_shell(["pytest", "-q"]))).decision is Decision.ALLOW
         assert engine.decisions()[0].rule == "allowlist:pytest"
 
-    def test_a_broad_learned_rule_covers_a_longer_command(
+    async def test_a_broad_learned_rule_covers_a_longer_command(
         self, engines: Callable[..., PolicyEngine]
     ) -> None:
         engine = engines(approver=DenyAllApprover())
         engine.remember(["git"])
-        engine(_shell(["git", "commit", "-m", "msg"]))
+        await engine(_shell(["git", "commit", "-m", "msg"]))
         assert engine.decisions()[0].rule == "allowlist:git"
 
-    def test_revoking_a_learned_rule_makes_it_ask_again(
+    async def test_revoking_a_learned_rule_makes_it_ask_again(
         self, engines: Callable[..., PolicyEngine]
     ) -> None:
         engine = engines(approver=DenyAllApprover())
         engine.remember(["pytest"])
         assert engine.revoke(["pytest"]) is True
-        assert engine(_shell(["pytest"])).decision is Decision.DENY
+        assert (await engine(_shell(["pytest"]))).decision is Decision.DENY
         assert engine.revoke(["pytest"]) is False
 
-    def test_a_command_tier_tool_with_no_command_is_refused(
+    async def test_a_command_tier_tool_with_no_command_is_refused(
         self, engines: Callable[..., PolicyEngine]
     ) -> None:
         engine = engines(approver=AutoApprover())
-        verdict = engine(_request(FakeTool(RiskTier.EXEC_UNSAFE), arguments={}))
+        verdict = await engine(_request(FakeTool(RiskTier.EXEC_UNSAFE), arguments={}))
         assert verdict.decision is Decision.DENY
         assert engine.decisions()[0].rule == "exec:unclassifiable"
 
-    def test_a_command_tier_tool_with_a_blank_command_is_refused(
+    async def test_a_command_tier_tool_with_a_blank_command_is_refused(
         self, engines: Callable[..., PolicyEngine]
     ) -> None:
         engine = engines(approver=AutoApprover())
-        assert engine(_shell([])).decision is Decision.DENY
+        assert (await engine(_shell([]))).decision is Decision.DENY
         assert engine.decisions()[0].rule == "exec:unclassifiable"
 
-    def test_a_command_that_is_not_a_string_is_refused(
+    async def test_a_command_that_is_not_a_string_is_refused(
         self, engines: Callable[..., PolicyEngine]
     ) -> None:
         engine = engines(approver=AutoApprover())
-        assert engine(_shell(42)).decision is Decision.DENY
+        assert (await engine(_shell(42))).decision is Decision.DENY
         assert engine.decisions()[0].rule == "exec:unclassifiable"
 
 
 class TestUnknownTool:
-    def test_an_unregistered_tool_is_refused(self, engines: Callable[..., PolicyEngine]) -> None:
+    async def test_an_unregistered_tool_is_refused(
+        self, engines: Callable[..., PolicyEngine]
+    ) -> None:
         engine = engines(approver=AutoApprover())
-        verdict = engine(_request(None, name="mystery", arguments={"command": "ls"}))
+        verdict = await engine(_request(None, name="mystery", arguments={"command": "ls"}))
         assert verdict.decision is Decision.DENY
         assert engine.decisions()[0].rule == "unknown-tool"
         assert "not a registered tool" in verdict.reason
 
-    def test_the_engine_never_asks_about_a_tool_it_cannot_classify(
+    async def test_the_engine_never_asks_about_a_tool_it_cannot_classify(
         self, engines: Callable[..., PolicyEngine]
     ) -> None:
         approver = RecordingApprover(Approval(Decision.ALLOW))
-        engines(approver=approver)(_request(None, name="mystery"))
+        await engines(approver=approver)(_request(None, name="mystery"))
         assert approver.requests == []
 
 
 class TestTypedConfirmation:
-    def test_a_destructive_call_needs_the_command_typed_back(
+    async def test_a_destructive_call_needs_the_command_typed_back(
         self, engines: Callable[..., PolicyEngine]
     ) -> None:
         approver = RecordingApprover(Approval(Decision.ALLOW))
         engine = engines(approver=approver)
-        verdict = engine(_shell(["rm", "-rf", "build"]))
+        verdict = await engine(_shell(["rm", "-rf", "build"]))
         assert verdict.decision is Decision.DENY
         assert engine.decisions()[0].rule == "confirmation:builtin:rm recursive force"
         assert "'rm -rf build'" in verdict.reason
 
-    def test_typing_it_back_is_enough(self, engines: Callable[..., PolicyEngine]) -> None:
+    async def test_typing_it_back_is_enough(self, engines: Callable[..., PolicyEngine]) -> None:
         approver = RecordingApprover(Approval(Decision.ALLOW, typed="rm -rf build"))
         engine = engines(approver=approver)
-        assert engine(_shell(["rm", "-rf", "build"])).decision is Decision.ALLOW
+        assert (await engine(_shell(["rm", "-rf", "build"]))).decision is Decision.ALLOW
 
-    def test_an_ordinary_call_needs_no_typing(self, engines: Callable[..., PolicyEngine]) -> None:
+    async def test_an_ordinary_call_needs_no_typing(
+        self, engines: Callable[..., PolicyEngine]
+    ) -> None:
         approver = RecordingApprover(Approval(Decision.ALLOW))
         engine = engines(approver=approver)
-        assert engine(_shell(["pytest", "-q"])).decision is Decision.ALLOW
+        assert (await engine(_shell(["pytest", "-q"]))).decision is Decision.ALLOW
         assert approver.requests[0].needs_typed_confirmation is False
 
-    def test_typing_the_wrong_thing_does_not_approve_it(
+    async def test_typing_the_wrong_thing_does_not_approve_it(
         self, engines: Callable[..., PolicyEngine]
     ) -> None:
         approver = RecordingApprover(Approval(Decision.ALLOW, typed="rm -rf /"))
         engine = engines(approver=approver)
-        assert engine(_shell(["rm", "-rf", "build"])).decision is Decision.DENY
+        assert (await engine(_shell(["rm", "-rf", "build"]))).decision is Decision.DENY
 
 
 class TestRememberFromAnApproval:
-    def test_an_approval_can_learn_the_command(self, engines: Callable[..., PolicyEngine]) -> None:
+    async def test_an_approval_can_learn_the_command(
+        self, engines: Callable[..., PolicyEngine]
+    ) -> None:
         approver = RecordingApprover(Approval(Decision.ALLOW, remember=True))
         engine = engines(approver=approver)
-        assert engine(_shell(["pytest", "-q"])).decision is Decision.ALLOW
+        assert (await engine(_shell(["pytest", "-q"]))).decision is Decision.ALLOW
         assert engine.decisions()[0].rule == "learned:pytest -q"
 
-    def test_a_learned_approval_makes_the_next_call_free(
+    async def test_a_learned_approval_makes_the_next_call_free(
         self, engines: Callable[..., PolicyEngine]
     ) -> None:
         engine = engines(approver=RecordingApprover(Approval(Decision.ALLOW, remember=True)))
-        engine(_shell(["pytest", "-q"]))
+        await engine(_shell(["pytest", "-q"]))
         engine.approver = DenyAllApprover()
-        assert engine(_shell(["pytest", "-q", "tests/unit"])).decision is Decision.ALLOW
+        assert (await engine(_shell(["pytest", "-q", "tests/unit"]))).decision is Decision.ALLOW
 
-    def test_a_deny_never_learns_anything(self, engines: Callable[..., PolicyEngine]) -> None:
+    async def test_a_deny_never_learns_anything(self, engines: Callable[..., PolicyEngine]) -> None:
         engine = engines(approver=DenyAllApprover())
-        engine(_shell(["pytest"]))
+        await engine(_shell(["pytest"]))
         assert engine.rules.entries() == ()
 
-    def test_remembering_a_call_with_no_command_persists_nothing(
+    async def test_remembering_a_call_with_no_command_persists_nothing(
         self, engines: Callable[..., PolicyEngine]
     ) -> None:
         approver = RecordingApprover(Approval(Decision.ALLOW, remember=True))
         engine = engines(mode=PolicyMode.ASK, approver=approver)
-        assert engine(_write()).decision is Decision.ALLOW
+        assert (await engine(_write())).decision is Decision.ALLOW
         assert engine.rules.entries() == ()
         assert engine.decisions()[0].rule == "approver:tier:write_workspace"
 
 
 class TestApproverSeam:
-    def test_the_request_carries_the_facts_a_human_needs(
+    async def test_the_request_carries_the_facts_a_human_needs(
         self, engines: Callable[..., PolicyEngine]
     ) -> None:
         approver = RecordingApprover(Approval(Decision.DENY))
         engine = engines(mode=PolicyMode.ASK, approver=approver)
-        engine(_write(path="notes to self.md"))
+        await engine(_write(path="notes to self.md"))
         request = approver.requests[0]
         assert request.name == "edit"
         assert request.tier is RiskTier.WRITE_WORKSPACE
         assert request.paths == ("notes to self.md",)
         assert request.reason
 
-    def test_the_command_is_passed_to_the_approver(
+    async def test_the_command_is_passed_to_the_approver(
         self, engines: Callable[..., PolicyEngine]
     ) -> None:
         approver = RecordingApprover(Approval(Decision.DENY))
-        engines(approver=approver)(_shell(["pytest", "-q"]))
+        await engines(approver=approver)(_shell(["pytest", "-q"]))
         assert approver.requests[0].argv == ("pytest", "-q")
 
-    def test_an_approver_deny_explains_itself(self, engines: Callable[..., PolicyEngine]) -> None:
+    async def test_an_approver_deny_explains_itself(
+        self, engines: Callable[..., PolicyEngine]
+    ) -> None:
         approver = RecordingApprover(Approval(Decision.DENY, note="you said no"))
         engine = engines(approver=approver)
-        verdict = engine(_shell(["pytest"]))
+        verdict = await engine(_shell(["pytest"]))
         assert verdict.reason == "you said no"
         assert engine.decisions()[0].rule == "approver:tier:exec_unsafe"
 
-    def test_the_headless_default_refuses_rather_than_guessing(
+    async def test_the_headless_default_refuses_rather_than_guessing(
         self, ctx: ToolContext, tmp_path: Path
     ) -> None:
         engine = PolicyEngine(ctx, config=PolicyConfig(db_path=tmp_path / "policy.db"))
         try:
             assert isinstance(engine.approver, DenyAllApprover)
-            assert engine(_shell(["pytest"])).decision is Decision.DENY
+            assert (await engine(_shell(["pytest"]))).decision is Decision.DENY
         finally:
             engine.close()
 
 
 class TestDecisionLog:
-    def test_every_call_is_logged_with_the_rule_that_fired(
+    async def test_every_call_is_logged_with_the_rule_that_fired(
         self, engines: Callable[..., PolicyEngine]
     ) -> None:
         engine = engines(approver=DenyAllApprover())
-        engine(_write(RiskTier.READ, "a.py"))
-        engine(_shell(["pytest"]))
+        await engine(_write(RiskTier.READ, "a.py"))
+        await engine(_shell(["pytest"]))
         records = engine.decisions()
         assert [record.rule for record in records] == ["approver:tier:exec_unsafe", "tier:read"]
         assert [record.decision for record in records] == [Decision.DENY, Decision.ALLOW]
 
-    def test_the_log_round_trips_argv_and_paths(self, engines: Callable[..., PolicyEngine]) -> None:
+    async def test_the_log_round_trips_argv_and_paths(
+        self, engines: Callable[..., PolicyEngine]
+    ) -> None:
         engine = engines(mode=PolicyMode.ASK, approver=DenyAllApprover())
-        engine(_shell(["git", "commit", "-m", "two words"]))
-        engine(_write(path="a file.txt"))
+        await engine(_shell(["git", "commit", "-m", "two words"]))
+        await engine(_write(path="a file.txt"))
         write_record, exec_record = engine.decisions(2)
         assert exec_record.argv == ("git", "commit", "-m", "two words")
         assert write_record.paths == ("a file.txt",)
         assert write_record.name == "edit"
         assert write_record.at
 
-    def test_the_log_honours_the_limit(self, engines: Callable[..., PolicyEngine]) -> None:
+    async def test_the_log_honours_the_limit(self, engines: Callable[..., PolicyEngine]) -> None:
         engine = engines(approver=DenyAllApprover())
         for _ in range(4):
-            engine(_shell(["pytest"]))
+            await engine(_shell(["pytest"]))
         assert len(engine.decisions(limit=2)) == 2
 
-    def test_the_log_survives_a_reopened_engine(self, ctx: ToolContext, tmp_path: Path) -> None:
+    async def test_the_log_survives_a_reopened_engine(
+        self, ctx: ToolContext, tmp_path: Path
+    ) -> None:
         db = tmp_path / "policy.db"
         first = PolicyEngine(ctx, config=PolicyConfig(db_path=db))
-        first(_shell(["git", "status"]))
+        await first(_shell(["git", "status"]))
         first.close()
         second = PolicyEngine(ctx, config=PolicyConfig(db_path=db))
         try:
@@ -416,18 +436,18 @@ class TestDecisionLog:
         PolicyEngine(ctx, config=PolicyConfig(db_path=db)).close()
         assert not db.exists()
 
-    def test_a_denial_is_logged_with_the_tier_it_was_classified_as(
+    async def test_a_denial_is_logged_with_the_tier_it_was_classified_as(
         self, engines: Callable[..., PolicyEngine]
     ) -> None:
         engine = engines(approver=DenyAllApprover())
-        engine(_shell(["rm", "-rf", "build"]))
+        await engine(_shell(["rm", "-rf", "build"]))
         record = engine.decisions()[0]
         assert record.tier is RiskTier.EXEC_DESTRUCTIVE
         assert record.name == "shell"
 
 
-def test_allow_all_policy_is_the_caller_s_opt_out_not_the_default() -> None:
+async def test_allow_all_policy_is_the_caller_s_opt_out_not_the_default() -> None:
     """The engine is the default; a caller with its own isolation can still opt out."""
     call = ToolCall(id="call-1", name="shell", arguments="{}")
     request = PolicyRequest(call=call, tool=None, name="shell", arguments={"command": "rm -rf /"})
-    assert allow_all_policy(request).decision is Decision.ALLOW
+    assert (await allow_all_policy(request)).decision is Decision.ALLOW

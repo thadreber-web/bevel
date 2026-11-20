@@ -46,64 +46,64 @@ class TestApprovalRequest:
 
 
 class TestDenyAllApprover:
-    def test_everything_is_refused(self) -> None:
+    async def test_everything_is_refused(self) -> None:
         for tier in RiskTier:
-            approval = DenyAllApprover().approve(_request(tier))
+            approval = await DenyAllApprover().approve(_request(tier))
             assert approval.decision is Decision.DENY
 
-    def test_the_note_says_nobody_was_asked(self) -> None:
-        approval = DenyAllApprover().approve(_request(RiskTier.WRITE_OUTSIDE))
+    async def test_the_note_says_nobody_was_asked(self) -> None:
+        approval = await DenyAllApprover().approve(_request(RiskTier.WRITE_OUTSIDE))
         assert "no approver is installed" in approval.note
         assert "shell" in approval.note
         assert "write_outside" in approval.note
 
-    def test_the_note_names_the_command_so_the_model_can_ask(self) -> None:
-        approval = DenyAllApprover().approve(_request(argv=("git", "push")))
+    async def test_the_note_names_the_command_so_the_model_can_ask(self) -> None:
+        approval = await DenyAllApprover().approve(_request(argv=("git", "push")))
         assert "'git push'" in approval.note
 
-    def test_a_deny_carries_no_typed_text(self) -> None:
-        approval = DenyAllApprover().approve(
+    async def test_a_deny_carries_no_typed_text(self) -> None:
+        approval = await DenyAllApprover().approve(
             _request(RiskTier.EXEC_DESTRUCTIVE, ("rm", "-rf", "x"))
         )
         assert approval.typed == ""
 
 
 class TestAutoApprover:
-    def test_everything_is_allowed(self) -> None:
+    async def test_everything_is_allowed(self) -> None:
         for tier in RiskTier:
-            approval = AutoApprover().approve(_request(tier))
+            approval = await AutoApprover().approve(_request(tier))
             assert approval.decision is Decision.ALLOW
 
-    def test_the_log_can_tell_it_was_not_a_human(self) -> None:
-        approval = AutoApprover().approve(_request(RiskTier.WRITE_OUTSIDE))
+    async def test_the_log_can_tell_it_was_not_a_human(self) -> None:
+        approval = await AutoApprover().approve(_request(RiskTier.WRITE_OUTSIDE))
         assert "no human was consulted" in approval.note
 
-    def test_it_supplies_the_confirmation_text(self) -> None:
+    async def test_it_supplies_the_confirmation_text(self) -> None:
         request = _request(RiskTier.EXEC_DESTRUCTIVE, ("git", "clean", "-fd"))
-        approval = AutoApprover().approve(request)
+        approval = await AutoApprover().approve(request)
         assert approval.typed == request.confirmation
 
-    def test_it_does_not_learn_rules_on_the_operator_s_behalf(self) -> None:
-        assert AutoApprover().approve(_request()).remember is False
+    async def test_it_does_not_learn_rules_on_the_operator_s_behalf(self) -> None:
+        assert (await AutoApprover().approve(_request())).remember is False
 
 
 class TestApproverProtocol:
-    def test_a_hand_written_approver_is_all_the_seam_needs(self) -> None:
+    async def test_a_hand_written_approver_is_all_the_seam_needs(self) -> None:
         class Recorder:
             def __init__(self) -> None:
                 self.seen: list[ApprovalRequest] = []
 
-            def approve(self, request: ApprovalRequest) -> Approval:
+            async def approve(self, request: ApprovalRequest) -> Approval:
                 self.seen.append(request)
                 return Approval(Decision.ALLOW, note="recorded")
 
         recorder = Recorder()
-        approval = recorder.approve(_request(RiskTier.EXEC_UNSAFE, ("pytest",)))
+        approval = await recorder.approve(_request(RiskTier.EXEC_UNSAFE, ("pytest",)))
         assert approval.decision is Decision.ALLOW
         assert recorder.seen[0].argv == ("pytest",)
 
     @pytest.mark.parametrize("approver", [DenyAllApprover(), AutoApprover()])
-    def test_builtin_approvers_answer_a_request_without_asking_for_more(
+    async def test_builtin_approvers_answer_a_request_without_asking_for_more(
         self, approver: Approver
     ) -> None:
-        assert isinstance(approver.approve(_request()), Approval)
+        assert isinstance(await approver.approve(_request()), Approval)

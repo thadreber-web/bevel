@@ -91,9 +91,13 @@ class Approver(Protocol):
     Two implementations exist and the engine depends only on this: the m07 TUI
     modal will be a third. It is a protocol rather than a base class because
     the engine must never learn what an approver is built on.
+
+    :meth:`approve` is a coroutine so an interactive approver can await a real
+    answer — a Textual modal, an ``input()`` prompt in a worker — without
+    blocking the event loop that has to render it.
     """
 
-    def approve(self, request: ApprovalRequest) -> Approval: ...
+    async def approve(self, request: ApprovalRequest) -> Approval: ...
 
 
 class DenyAllApprover:
@@ -104,7 +108,7 @@ class DenyAllApprover:
     adapt instead of retrying a call that will be refused forever.
     """
 
-    def approve(self, request: ApprovalRequest) -> Approval:
+    async def approve(self, request: ApprovalRequest) -> Approval:
         asked = " ".join(request.argv) if request.argv else request.name
         return Approval(
             Decision.DENY,
@@ -127,7 +131,7 @@ class AutoApprover:
     unexamined one.
     """
 
-    def approve(self, request: ApprovalRequest) -> Approval:
+    async def approve(self, request: ApprovalRequest) -> Approval:
         return Approval(
             Decision.ALLOW,
             note="approved automatically by AutoApprover; no human was consulted",

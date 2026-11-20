@@ -25,7 +25,7 @@ from __future__ import annotations
 import logging
 import shlex
 import sqlite3
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -80,10 +80,10 @@ class PolicyVerdict:
     reason: str = ""
 
 
-PolicyEvaluator = Callable[[PolicyRequest], PolicyVerdict]
+PolicyEvaluator = Callable[[PolicyRequest], Awaitable[PolicyVerdict]]
 
 
-def allow_all_policy(request: PolicyRequest) -> PolicyVerdict:  # noqa: ARG001
+async def allow_all_policy(request: PolicyRequest) -> PolicyVerdict:  # noqa: ARG001
     """Allow everything, unconditionally.
 
     Not the default — the default is :class:`PolicyEngine`. This is the explicit
@@ -234,8 +234,8 @@ class PolicyEngine:
         self.rules = RuleStore(db_path)
         self.log = DecisionLog(db_path)
 
-    def __call__(self, request: PolicyRequest) -> PolicyVerdict:
-        verdict, record = self._evaluate(request)
+    async def __call__(self, request: PolicyRequest) -> PolicyVerdict:
+        verdict, record = await self._evaluate(request)
         self.log.record(record)
         if verdict.decision is Decision.DENY:
             logger.info(
@@ -265,7 +265,7 @@ class PolicyEngine:
 
     # ------------------------------------------------------------------ private
 
-    def _evaluate(self, request: PolicyRequest) -> tuple[PolicyVerdict, PolicyDecision]:
+    async def _evaluate(self, request: PolicyRequest) -> tuple[PolicyVerdict, PolicyDecision]:
         tool = request.tool
         if tool is None:
             return self._deny(
@@ -291,12 +291,12 @@ class PolicyEngine:
             )
 
         if draft.tier in _EXEC_TIERS:
-            return self._evaluate_exec(draft)
+            return await self._evaluate_exec(draft)
         if draft.tier is RiskTier.READ:
             return self._allow(draft, rule="tier:read", reason="reads are free")
         if draft.tier in _PATH_TIERS:
-            return self._evaluate_write(draft)
-        return self._ask(
+            return await self._evaluate_write(draft)
+        return await self._ask(
             draft,
             rule=f"tier:{draft.tier.value}",
             reason=f"{draft.name} is tier {draft.tier.value}, which always needs your approval",
@@ -308,7 +308,7 @@ class PolicyEngine:
         outside = self._outside(paths) if tier in _PATH_TIERS else ()
         return _Draft(name=name, tier=tier, argv=argv, paths=paths, outside=outside)
 
-    def _evaluate_exec(self, draft: _Draft) -> tuple[PolicyVerdict, PolicyDecision]:
+    async def _evaluate_exec(self, draft: _Draft) -> tuple[PolicyVerdict, PolicyDecision]:
         if not draft.argv:
             return self._deny(
                 draft,
@@ -322,7 +322,7 @@ class PolicyEngine:
         destructive = match_destructive(draft.argv)
         if destructive is not None:
             draft = _Draft(draft.name, RiskTier.EXEC_DESTRUCTIVE, draft.argv, draft.paths)
-            return self._ask(
+            return await self._ask(
                 draft,
                 rule=f"builtin:{destructive}",
                 reason=f"{shlex.join(draft.argv)} matches the destructive pattern {destructive!r}",
@@ -341,7 +341,7 @@ class PolicyEngine:
                 reason=f"{shlex.join(draft.argv)} is covered by the allowlist rule {covered!r}",
             )
 
-        return self._ask(
+        return await self._ask(
             draft,
             rule="tier:exec_unsafe",
             reason=(
@@ -350,9 +350,9 @@ class PolicyEngine:
             ),
         )
 
-    def _evaluate_write(self, draft: _Draft) -> tuple[PolicyVerdict, PolicyDecision]:
+    async def _evaluate_write(self, draft: _Draft) -> tuple[PolicyVerdict, PolicyDecision]:
         if draft.outside:
-            return self._ask(
+            return await self._ask(
                 draft,
                 rule="path-jail",
                 reason=(
@@ -361,7 +361,7 @@ class PolicyEngine:
                 ),
             )
         if draft.tier is RiskTier.WRITE_OUTSIDE:
-            return self._ask(
+            return await self._ask(
                 draft,
                 rule="tier:write_outside",
                 reason=f"{draft.name} writes outside the workspace and always needs your approval",
@@ -372,7 +372,7 @@ class PolicyEngine:
                 rule="mode:auto",
                 reason="workspace writes are automatic in auto mode",
             )
-        return self._ask(
+        return await self._ask(
             draft,
             rule="tier:write_workspace",
             reason=f"writing with {draft.name} needs your approval",
@@ -388,7 +388,7 @@ class PolicyEngine:
                 outside.append(path)
         return tuple(outside)
 
-    def _ask(
+    async def _ask(
         self,
         draft: _Draft,
         *,
@@ -402,7 +402,7 @@ class PolicyEngine:
             argv=draft.argv,
             paths=draft.paths,
         )
-        approval = self.approver.approve(request)
+        approval = await self.approver.approve(request)
 
         if approval.decision is Decision.DENY:
             return self._deny(
