@@ -13,10 +13,13 @@ One iteration is:
 9. repeat, until the model stops asking for tools or a budget runs out.
 
 Step 7 takes the session's checkpoint commit before the first batch that writes (see
-:mod:`bevel.core.checkpoint`). Steps 1 and 8 are **seams**, not features. They are
-named in :data:`UNBUILT_SEAMS`, reported on every :class:`AgentResult`, and logged
-once per run. Nothing here pretends to compact a transcript. Policy (step 4) is
-enforced by :class:`~bevel.core.policy.PolicyEngine`.
+:mod:`bevel.core.checkpoint`). Step 1 now orients: the project map from
+:mod:`bevel.core.context.project_map` goes on the wire before the first completion, so
+the model knows the layout without spending a tool call discovering it. What is still
+missing from steps 1 and 8 — fitting the context to a budget, and compacting it — is
+named in :data:`UNBUILT_SEAMS`, reported on every :class:`AgentResult`, and logged once
+per run. Nothing here pretends to compact a transcript. Policy (step 4) is enforced by
+:class:`~bevel.core.policy.PolicyEngine`.
 
 Cancellation
 ------------
@@ -55,6 +58,7 @@ from typing import Any, Final
 
 from bevel.config.schema import PolicyConfig
 from bevel.core.checkpoint import snapshot
+from bevel.core.context.project_map import build_project_map
 from bevel.core.messages import Message, ToolCall
 from bevel.core.policy import (
     Approver,
@@ -109,7 +113,8 @@ DEFAULT_CONCURRENCY: Final[int] = 4
 
 _SEAM_CONTEXT: Final[str] = (
     "m08 (context budgeting, L1/L2/L3 compaction, session persistence) is not built: "
-    "the transcript is never summarised, truncated, or saved — it only grows"
+    "the project map orients the first request, but the transcript is afterwards never "
+    "summarised, truncated, or saved — it only grows"
 )
 
 #: What this loop does *not* do, in the words the loop itself reports.
@@ -118,10 +123,16 @@ UNBUILT_SEAMS: Final[tuple[str, ...]] = (_SEAM_CONTEXT,)
 DEFAULT_SYSTEM_PROMPT: Final[str] = (
     "You are bevel, a coding agent working in a local workspace.\n"
     "\n"
-    "Find things out instead of guessing: read before you edit, grep to locate, glob to "
-    "enumerate. Make the smallest change that fixes the problem, and never claim a change "
-    'works unless you have run something that proves it. "Not built yet" is a correct '
-    "answer; invented output is not.\n"
+    "Answer conversational messages directly: a greeting, or a question about bevel "
+    "itself, gets a reply with zero tool calls. A project map of the workspace is "
+    "already in your context -- the tree, the manifests, the README head, the entry "
+    "points. That map is your orientation; do not re-explore the tree to get it. Reach "
+    "for a tool only when the map cannot answer the question in front of you.\n"
+    "\n"
+    "When you are working, find things out instead of guessing: read before you edit, "
+    "grep to locate, glob to enumerate. Make the smallest change that fixes the "
+    "problem, and never claim a change works unless you have run something that proves "
+    'it. "Not built yet" is a correct answer; invented output is not.\n'
     "\n"
     "Limits of this build: the workspace is snapshotted once before the first write, so "
     "a run can be undone, but there is no per-step rollback -- an undo rewinds the whole "
@@ -523,7 +534,12 @@ class Agent:
         self._running = True
         self._cancel_reason = ""
         self._cancel_event.clear()
-        state.messages.extend((Message.system(self.system), Message.user(task)))
+        # The walk is bounded but real disk I/O, and it happens while the TUI is
+        # live, so it goes off the event loop.
+        project_map = await asyncio.to_thread(build_project_map, self.ctx.workspace)
+        state.messages.extend(
+            (Message.system(f"{self.system}\n\n{project_map}"), Message.user(task))
+        )
         totals = _Totals()
         logger.warning("agent loop starting with unbuilt seams: %s", "; ".join(UNBUILT_SEAMS))
         yield AgentEvent(AgentEventType.STARTED, iteration=0, text=task)

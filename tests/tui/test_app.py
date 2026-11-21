@@ -122,6 +122,29 @@ async def test_submitted_task_and_answer_both_render(make_app: Callable[..., Bev
     assert any(line == "done  12 tokens" for line in shown), shown
 
 
+async def test_greeting_gets_a_reply_and_no_tool_cards(
+    make_app: Callable[..., BevelApp], tmp_path: Path
+) -> None:
+    """The manual check, automated: "hello" is answered, and nothing was run first.
+
+    The provider is scripted to answer without tools, so the assertion that earns
+    its keep here is that the project map was already on the wire -- the
+    orientation that makes a tool-free greeting the model's obvious move.
+    """
+    (tmp_path / "pyproject.toml").write_text('[project]\nname = "demo"\n', encoding="utf-8")
+    app = make_app(ScriptedTurn(content="Hi. What are we doing?"))
+    async with app.run_test() as pilot:
+        await submit(pilot, "hello")
+        assert await settle(pilot, lambda: any("done" in line for line in lines(app)))
+        shown = lines(app)
+        sent = app.provider.requests[0]["messages"]
+    assert any(line == "Hi. What are we doing?" for line in shown), shown
+    assert not list(app.query(ToolCard)), "a greeting must not cost the user tool cards"
+    text = "\n".join(message.content for message in sent)
+    assert "# project map:" in text
+    assert 'name = "demo"' in text
+
+
 async def test_content_arrives_as_markdown_not_raw_text(make_app: Callable[..., BevelApp]) -> None:
     """CONTENT goes through the markdown renderer; the source is kept for the test."""
     app = make_app(ScriptedTurn(content="# heading\n\n- one\n- two"))

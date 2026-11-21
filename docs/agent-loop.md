@@ -2,10 +2,11 @@
 
 `core/agent.py` runs *orient → plan → act → observe* under explicit budgets, and is
 the piece every later milestone sits on. Policy (`core/policy/`) now decides every
-tool call, and checkpoints (`core/checkpoint/`) snapshot the workspace before the
-first write. Context management (`core/context/`) still attaches at the one seam
-named below. The loop stays agnostic of all three: it asks a `PolicyEvaluator` and
-records the verdict, without knowing what an engine is.
+tool call, checkpoints (`core/checkpoint/`) snapshot the workspace before the
+first write, and the orient step (`core/context/project_map.py`) puts the repo on the
+model's first request. Budgeting and compaction (`core/context/`) still attach at the
+one seam named below. The loop stays agnostic of all three: it asks a `PolicyEvaluator`
+and records the verdict, without knowing what an engine is.
 
 ## Shape
 
@@ -59,6 +60,27 @@ destructive rule tables and the learned allowlist in `policy.db`, consults an
 rule that produced it. `allow_all_policy` remains exported as a caller's explicit
 opt-out, not the default.
 
+## Orient
+
+Before the first completion, the loop builds a project map
+(`core/context/project_map.py`) and puts it in front of the model. It is one bounded
+directory walk: the tree to a capped depth, the heads of the manifests and the README,
+and the declared entry points. Every section is capped and every cut says it was cut
+and names the tool to use instead — a map that grows with the repo would eat the
+context it exists to save.
+
+The map is built once per run, off the event loop, and never refreshed. It honours the
+workspace's own `.gitignore` for names, and prunes the same junk directories the `glob`
+tool prunes, so the two never disagree about what exists. Pruning is a convenience, not
+a jail: anything the map hides is one `glob` call away. A workspace that cannot be read
+is reported *inside* the map rather than raising — a run with no orientation still has
+to answer a greeting.
+
+The system prompt tells the model the map is its orientation and that a greeting or a
+question about bevel is answered with zero tool calls. `tests/unit/test_agent_orient.py`
+and the TUI test of the same shape assert both halves: the map reached the wire, and no
+tool card appeared.
+
 ## Unbuilt seams
 
 `UNBUILT_SEAMS` is the list of capabilities the loop would use but does not have yet.
@@ -67,7 +89,7 @@ loop never fakes the behaviour it stands in for:
 
 | Seam | Arrives with |
 |---|---|
-| Context management and compaction | m08 |
+| Context budgeting, L1/L2/L3 compaction, session persistence | m08 (later slices) |
 
 A `CHECKPOINT` event is emitted once per run, before the first batch that writes to the
 workspace. Its text is the truth of what happened: either the session's checkpoint

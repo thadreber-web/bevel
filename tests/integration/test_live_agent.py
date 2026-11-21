@@ -214,6 +214,29 @@ async def test_a_plain_question_completes_in_one_iteration(
     _assert_transcript_is_wellformed(result)
 
 
+async def test_a_greeting_needs_no_tools_and_arrives_oriented(
+    endpoint: ModelProvider, workspace: Path
+) -> None:
+    """Same mechanics as the plain question, against the prompt a greeting gets.
+
+    The project map must be on the wire *before* the model is asked anything, which
+    is what makes zero tool calls the natural answer rather than a lucky one. The
+    map's presence is asserted on the transcript rather than the model's prose: a
+    real model can greet in any words it likes, and it cannot choose whether it was
+    oriented.
+    """
+    agent = Agent(endpoint, workspace, budgets=Budgets(max_iterations=3), options=GEN)
+    result = await agent.run("hello")
+
+    assert result.stop_reason is StopReason.COMPLETED, result.error
+    assert result.iterations == 1
+    assert result.tool_calls == 0, "a greeting was answered by exploring the tree"
+    assert result.final_text.strip(), "the model answered nothing"
+    assert "# project map:" in result.messages[0].content
+    assert "notes.txt" in result.messages[0].content
+    _assert_transcript_is_wellformed(result)
+
+
 async def test_server_reported_usage_arrives_and_is_not_invented(
     endpoint: ModelProvider, workspace: Path
 ) -> None:
