@@ -124,8 +124,8 @@ DEFAULT_SYSTEM_PROMPT: Final[str] = (
     "answer; invented output is not.\n"
     "\n"
     "Limits of this build: the workspace is snapshotted once before the first write, so "
-    "a run can be undone, but there is no per-step rollback and no undo command yet "
-    "(milestone m07). Policy is enforced: reads and workspace writes proceed, and anything "
+    "a run can be undone, but there is no per-step rollback -- an undo rewinds the whole "
+    "run. Policy is enforced: reads and workspace writes proceed, and anything "
     "the policy engine decides needs your approval is refused unless an approver is "
     "installed. Say what you need instead of assuming you have it."
 )

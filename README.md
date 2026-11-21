@@ -6,7 +6,7 @@ A terminal coding agent for model servers you already run.
 
 bevel talks to **OpenAI-compatible endpoints only** — [vLLM](https://docs.vllm.ai/) and [llama.cpp](https://github.com/ggml-org/llama.cpp)'s `llama-server`. No API keys, no per-token billing, no code leaving your network.
 
-> **Status: under construction.** The scaffold, capability probing, and `bevel doctor` work today, as do the provider layer, the tool layer, the agent loop, the policy engine, and checkpoints — the loop is covered by tests run against a real vLLM endpoint. The TUI, context management, memory, and sandbox arrive in m07–m12 — see [Build order](#build-order). `bevel` refuses to print a friendly lie about anything that isn't built yet: unimplemented subcommands exit non-zero and name the milestone that delivers them.
+> **Status: under construction.** The scaffold, capability probing, and `bevel doctor` work today, as do the provider layer, the tool layer, the agent loop, the policy engine, checkpoints, and the TUI — run `bevel` with no subcommand to open it. The loop is covered by tests run against a real vLLM endpoint, and the TUI by Textual's Pilot. Context management, memory, and sandboxing arrive in m08–m12 — see [Build order](#build-order). `bevel` refuses to print a friendly lie about anything that isn't built yet: unimplemented subcommands exit non-zero and name the milestone that delivers them, and the TUI prints the seams the loop does not implement instead of letting you assume they exist.
 
 ## Why this exists
 
@@ -104,12 +104,21 @@ llama-server -hf ggml-org/Qwen2.5-Coder-32B-Instruct-GGUF \
 
 Per-provider notes, including the parallel-tool-call and grammar (`--grammar-file` / `--grammar`) requirements, are a m14 deliverable. Until they exist, the flags above are the ones that actually matter and `bevel doctor` is the source of truth for what your endpoint supports.
 
+Then run it:
+
+```powershell
+uv run bevel
+```
+
+That opens the TUI over the current directory. `f2` cycles plan → default → auto mode, `f1` opens the command palette, `Ctrl+C` stops a run (and quits when nothing is running), and focusing a tool card that carries a diff then pressing `enter` opens it full-screen. `bevel undo` from a second terminal rewinds the working tree to the last checkpoint.
+
 ## What it does
 
 - **Agent loop** — orient → plan → act → observe, under explicit iteration, tool-call, and token budgets, with cancellation wired end-to-end: `cancel()` abandons the in-flight request *and* the tool tasks, which for the shell tool means the whole process tree. `core/agent.py` is covered by tests run against a real endpoint, and [docs/agent-loop.md](docs/agent-loop.md) explains the decisions.
 - **Tools** — read, grep, glob, write, edit (real diff application), shell (timeouts, process-tree kill). Each declares its JSON Schema and risk tier; `core/tools/registry.py` is the single source of truth for the offered list, and [docs/tool-layer.md](docs/tool-layer.md) explains the decisions.
 - **Tiered approvals** — `READ` free, `WRITE_WORKSPACE` ask, `WRITE_OUTSIDE` always ask, `EXEC_SAFE` free once allowlisted, `EXEC_UNSAFE` ask, `EXEC_DESTRUCTIVE` always ask with typed confirmation, `NETWORK_EGRESS` ask. Rules are learnable and every decision is logged with the rule that produced it. Checkpoints run even under `--yolo`.
-- **Checkpoints** — the working tree, uncommitted work-in-progress included, is committed to a `bevel/checkpoint/<session>` ref before the agent's first write, and `bevel.core.checkpoint.restore()` rewinds it. `bevel undo` arrives with the TUI in m07.
+- **TUI** — `bevel` with no subcommand. A streaming transcript (markdown answers, collapsed italic reasoning), one card per tool call coloured by its outcome, a full-screen diff viewer, plan/default/auto modes, an approval dialog, and `Ctrl+C` that genuinely stops the run. Tested with Textual's Pilot against `MockProvider`.
+- **Checkpoints** — the working tree, uncommitted work-in-progress included, is committed to a `bevel/checkpoint/<session>` ref before the agent's first write, and `bevel undo` rewinds it from either the CLI or the TUI.
 - **Context management** — budgeted assembly, three-level compaction, a project map.
 - **Memory** — SQLite FTS5 from the standard library, plus optional vector recall over your server's `/embeddings`.
 - **MCP** — hand-rolled JSON-RPC over stdio and streamable-HTTP, implementing the subset that matters.
@@ -160,8 +169,8 @@ Probing, enforcement, and verification are three separate roles. `_capability.py
 | ✅ | m03 tools |
 | ✅ | m04 agent loop |
 | ✅ | m05 policy + approvals |
-| ⬜ | m06 checkpoints |
-| ⬜ | m07 TUI |
+| ✅ | m06 checkpoints |
+| ✅ | m07 TUI |
 | ⬜ | m08 context management + sessions |
 | ⬜ | m09 memory |
 | ⬜ | m10 MCP client |

@@ -156,15 +156,25 @@ def _read_preamble(raw_lines: list[str]) -> tuple[str, str | None, int]:
 
 
 def _body_line(line: str, cursor: _Cursor) -> DiffLine:
-    """Build the diff line for a body line and advance the cursor."""
+    """Build the diff line for a body line and advance the cursor.
+
+    The number reported is the line the cursor is *on*, so it is read before it
+    is bumped. Reporting the bumped value would number every line one too high.
+    """
     if line.startswith("+"):
         cursor.added += 1
-        return DiffLine(ADD, line[1:], None, _bump(cursor.new_no))
+        new_no = cursor.new_no
+        cursor.new_no = _bump(new_no)
+        return DiffLine(ADD, line[1:], None, new_no)
     if line.startswith("-"):
         cursor.removed += 1
-        return DiffLine(DELETE, line[1:], _bump(cursor.old_no), None)
+        old_no = cursor.old_no
+        cursor.old_no = _bump(old_no)
+        return DiffLine(DELETE, line[1:], old_no, None)
     body = line[1:] if line.startswith(" ") else line
-    return DiffLine(CONTEXT, body, _bump(cursor.old_no), _bump(cursor.new_no))
+    old_no, new_no = cursor.old_no, cursor.new_no
+    cursor.old_no, cursor.new_no = _bump(old_no), _bump(new_no)
+    return DiffLine(CONTEXT, body, old_no, new_no)
 
 
 def render_diff(

@@ -19,7 +19,7 @@ calls it asked for, and appends one `role="tool"` message per call. The loop end
 the model answers without asking for tools, or when a budget, a cancellation, or a
 provider failure ends it.
 
-`AgentEvent` is the one stream that carries everything the TUI (m07) needs: text
+`AgentEvent` is the one stream that carries everything the TUI (`tui/app.py`) needs: text
 deltas, tool activity, compaction, budget warnings, unbuilt seams, and the terminal
 event. Consumers must assume **any** event can carry **no** payload — a delta with no
 text, a turn with no usage. The live tests assert that.

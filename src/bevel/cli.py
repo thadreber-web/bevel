@@ -10,18 +10,20 @@ exists to avoid. Subcommands that are planned but not built are listed in
 from __future__ import annotations
 
 import argparse
+import asyncio
 import sys
 from collections.abc import Sequence
+from pathlib import Path
 from typing import IO
 
 from . import __version__
 from ._capability import CapabilityReport, probe
+from .core.checkpoint import restore
 
 #: Subcommands that are planned but not built yet, mapped to the milestone
 #: that delivers them. Kept in one place so ``--help`` and the stub message
 #: cannot drift apart.
 _PENDING: dict[str, str] = {
-    "undo": "m07 (Textual TUI); the restore API in bevel.core.checkpoint already works",
     "sessions": "m08 (session persistence and resume)",
     "resume": "m08 (session persistence and resume)",
     "memory": "m09 (long-term memory)",
@@ -46,6 +48,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     subparsers = parser.add_subparsers(dest="command", metavar="COMMAND")
     subparsers.add_parser("doctor", help="report environment, endpoints and sandbox capability")
+    subparsers.add_parser("undo", help="rewind the working tree to the last checkpoint")
     for name in _PENDING:
         subparsers.add_parser(name, help=f"(planned) {name}")
     return parser
@@ -80,6 +83,26 @@ def _render_doctor(report: CapabilityReport) -> str:
     return "\n".join(lines)
 
 
+def _undo(out: IO[str], err: IO[str]) -> int:
+    """Rewind the working tree to the most recent checkpoint.
+
+    The restore API refuses rather than guessing -- no repository, no
+    checkpoints, or a state it cannot safely reconcile all come back as a
+    refusal with a reason. The refusal goes to stderr because it is a failure;
+    the rest of the report is what happened, so it goes to stdout.
+    """
+    result = asyncio.run(restore(Path.cwd()))
+    if not result.ok or result.commit is None:
+        err.write(f"bevel undo: {result.error or 'nothing was restored'}\n")
+        return 1
+    out.write(f"bevel undo: restored {result.commit[:8]}.\n")
+    if result.removed:
+        out.write(f"  removed {len(result.removed)} file(s) created after the checkpoint\n")
+    if result.untracked:
+        out.write(f"  left {len(result.untracked)} untracked file(s) in place\n")
+    return 0
+
+
 def _not_implemented(command: str, stream: IO[str]) -> int:
     stream.write(f"bevel {command}: not implemented yet -- planned for {_PENDING[command]}.\n")
     return 2
@@ -94,17 +117,20 @@ def main(argv: Sequence[str] | None = None) -> int:
         sys.stdout.write(_render_doctor(probe()) + "\n")
         return 0
 
+    if args.command == "undo":
+        return _undo(sys.stdout, sys.stderr)
+
     if args.command in _PENDING:
         return _not_implemented(args.command, sys.stderr)
 
     if args.command is not None:  # pragma: no cover - argparse rejects unknown commands
         parser.error(f"unknown command: {args.command}")
 
-    sys.stderr.write(
-        "The bevel TUI is not implemented yet -- planned for m07 (Textual TUI).\n"
-        "Try 'bevel doctor' to see what this machine supports.\n"
-    )
-    return 2
+    # Imported here rather than at module scope: textual costs ~1.3s to import,
+    # and `bevel doctor` and `bevel --version` must not pay for it.
+    from .tui.app import run_tui  # noqa: PLC0415
+
+    return run_tui()
 
 
 if __name__ == "__main__":  # pragma: no cover

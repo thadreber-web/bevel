@@ -11,9 +11,13 @@ nothing".
 
 from __future__ import annotations
 
+import re
+
 from rich.console import RenderableType
 from rich.markdown import Markdown
 from rich.text import Text
+
+_LINK = re.compile(r"\[([^\]]*)\]\(([^)\s]+)\)")
 
 __all__ = ["render_markdown", "strip_markdown"]
 
@@ -36,11 +40,12 @@ def strip_markdown(text: str) -> str:
     Used where a widget needs a single line (a transcript summary row, a tool
     card title) and a block-level renderer would be wrong. Bold/italic markers,
     inline code ticks, and heading hashes are removed; link targets are kept
-    inline as ``label (url)`` so nothing is lost.
+    inline as ``label (url)`` so nothing is lost. Links are expanded first,
+    since their brackets would otherwise survive the marker-stripping below.
     """
     out: list[str] = []
     for raw in text.splitlines():
-        line = raw.strip()
+        line = _LINK.sub(r"\1 (\2)", raw.strip())
         while line.startswith("#"):
             line = line[1:].lstrip()
         line = line.replace("**", "").replace("__", "").replace("`", "")
