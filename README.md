@@ -75,15 +75,36 @@ bevel doctor
 
 Note the last two lines and the `windows_sandbox` row. `WindowsSandbox.exe` is staged on capable SKUs whether or not the feature is enabled, so bevel checks for the service rather than the executable and refuses to advertise tier 2 it cannot reach.
 
-Then point it at a server. Config is layered — defaults → `~/.config/bevel/config.toml` → `./bevel.toml` → environment → flags. **Config loading lands in m02 with the provider layer**, so this is the target shape rather than something that works today:
+Then point it at a server. bevel refuses to invent an endpoint, so `bevel` exits with `no endpoint configured` until you give it one. Copy the example and fill in two values:
+
+```powershell
+New-Item -ItemType Directory -Force $HOME\.config\bevel
+Copy-Item bevel.toml.example $HOME\.config\bevel\config.toml
+notepad $HOME\.config\bevel\config.toml
+```
+
+Config is layered — defaults → `~/.config/bevel/config.toml` → `./bevel.toml` → `$env:BEVEL_CONFIG` → environment → flags. Only `base_url` and `model` are required:
 
 ```toml
-# ~/.config/bevel/config.toml  (m02)
-[[endpoints]]
-name = "qwen-coder"
+# ~/.config/bevel/config.toml
+[profile.home]
 base_url = "http://127.0.0.1:8000/v1"
-model = "Qwen2.5-Coder-32B-Instruct"
-supports = ["streaming", "tokenize", "tool_calls"]
+model    = "Qwen2.5-Coder-32B-Instruct"
+```
+
+`base_url` includes the `/v1` suffix; `model` must match what the server reports, exactly:
+
+```powershell
+curl.exe http://127.0.0.1:8000/v1/models
+```
+
+A local server usually needs no auth — leave `api_key_env` out and bevel sends no `Authorization` header. If it does need one, `api_key_env = "VLLM_API_KEY"` names the variable to read at request time, so the secret stays out of the file. `bevel.toml.example` documents every key, the environment-only alternative, and the trap where `BEVEL_BASE_URL` silently configures a profile you aren't using.
+
+Verify bevel parsed it before launching the TUI:
+
+```powershell
+uv run python -c "from bevel.config.loader import load; c = load(); print(c.sources); print(c.profiles[c.default_profile])"
+uv run bevel
 ```
 
 vLLM needs tool calling enabled, or the model will narrate tool calls instead of emitting them:

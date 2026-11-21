@@ -1,0 +1,130 @@
+# bevel configuration -- EXAMPLE, not read by bevel.
+#
+# Copy this to one of the two places bevel actually reads, then fill in the
+# two required values. Later files win, and tables merge key by key, so a
+# project file can pin a model without restating the whole endpoint.
+#
+#   C:\Users\<you>\.config\bevel\config.toml    your machine-wide config
+#   .\bevel.toml                                 per-project, overrides the above
+#
+# PowerShell, machine-wide:
+#
+#   New-Item -ItemType Directory -Force $HOME\.config\bevel
+#   Copy-Item bevel.toml.example $HOME\.config\bevel\config.toml
+#   notepad $HOME\.config\bevel\config.toml
+#
+# Then check bevel understood it before launching the TUI:
+#
+#   uv run python -c "from bevel.config.loader import load; c = load(); print(c.sources); print(c.profiles[c.default_profile])"
+#   uv run bevel
+#
+# ---------------------------------------------------------------------------
+# The two required values
+# ---------------------------------------------------------------------------
+#
+# base_url  The OpenAI-compatible root, INCLUDING the /v1 suffix. Must start
+#           with http:// or https://. No trailing slash needed -- bevel strips
+#           it. Ask the server what it serves if unsure:
+#
+#               curl.exe http://<host>:8000/v1/models
+#
+# model     The model id exactly as that /v1/models response reports it. A
+#           mismatch is the most common cause of a 404 on the first request,
+#           and it is a 404 from the server, not a bevel error.
+#
+# ---------------------------------------------------------------------------
+# Everything below is optional. Delete what you do not use -- an unknown key
+# here is a hard error naming the file and the key, not a silent ignore.
+# ---------------------------------------------------------------------------
+
+# Only needed if you define more than one [profile.<name>] table below. With a
+# single profile, bevel selects it automatically.
+# default_profile = "home"
+
+[profile.home]
+base_url = "http://127.0.0.1:8000/v1"
+model = "Qwen2.5-Coder-32B-Instruct"
+
+# --- authentication -------------------------------------------------------
+# A local vLLM or llama.cpp server usually needs NO auth. If yours does not,
+# delete both keys below -- bevel then sends no Authorization header at all.
+#
+# Prefer api_key_env: it names an ENVIRONMENT VARIABLE to read the key from at
+# request time, so the secret never lands in this file and never reaches git.
+#
+#   $env:VLLM_API_KEY = "<the key>"
+#
+# api_key is the literal key. It works, and it is the wrong choice for a file
+# you might commit; it exists for throwaway and test configs.
+# api_key_env = "VLLM_API_KEY"
+# api_key = "literal-key-do-not-commit-this"
+
+# --- timeouts -------------------------------------------------------------
+# timeout is the read timeout in seconds; connect_timeout is how long to wait
+# for the connection. Raise timeout for a large model on a cold start, where
+# loading weights can take minutes before the first token.
+# timeout = 120
+# connect_timeout = 10
+
+# --- TLS ------------------------------------------------------------------
+# THE MOST COMMON FIRST FAILURE. A self-hosted server on a bare IP usually has
+# a self-signed certificate, and every message then dies in the TUI with
+# "provider error". The reason is the giveaway:
+#
+#   [SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed:
+#       unable to get local issuer certificate
+#
+# Two ways out. Prefer the first.
+#
+#   1. Trust the certificate, and leave verification on:
+#        openssl s_client -showcerts -connect 10.0.0.252:443 </dev/null  # copy the cert
+#        certutil -addstore -f "Root" ca.pem          # admin PowerShell, Windows
+#
+#   2. Turn verification off for that profile only:
+#        verify_tls = false
+#
+# Option 2 is reasonable for a box on a private network you control. It is not
+# reasonable for anything crossing a network you do not control, and bevel logs
+# a warning when it is off. BEVEL_INSECURE_TLS=1 does the same thing without
+# editing this file.
+#
+# Check which case you are in without opening the TUI:
+#
+#   uv run python -c "import asyncio; from bevel.config.loader import load; \
+#     from bevel.providers.registry import Registry; c=load(); \
+#     r=Registry(c.profiles, default_profile=c.default_profile); \
+#     print(asyncio.run(r.provider().health()))"
+#
+# verify_tls = true
+
+# --- extra headers --------------------------------------------------------
+# Merged into every request. Useful for a gateway that routes on a header.
+# [profile.home.headers]
+# x-tenant = "dev"
+
+# --- policy ---------------------------------------------------------------
+# mode "auto" lets workspace writes through and still asks before running a
+# command. "ask" asks for both. The TUI's f2 key cycles plan/default/auto;
+# plan mode is read-only regardless of what is set here.
+# allow and deny are command patterns the engine consults before asking.
+# [policy]
+# mode = "auto"
+# allow = ["pytest", "ruff check"]
+# deny = ["git push"]
+
+# ---------------------------------------------------------------------------
+# Alternative: no file at all
+# ---------------------------------------------------------------------------
+#
+# The environment can configure bevel on its own, which is how the integration
+# tests do it:
+#
+#   $env:BEVEL_BASE_URL = "http://127.0.0.1:8000/v1"
+#   $env:BEVEL_MODEL    = "Qwen2.5-Coder-32B-Instruct"
+#   uv run bevel
+#
+# TRAP: those two variables always write to the profile named by BEVEL_PROFILE,
+# which defaults to "default". If this file defines [profile.home] and sets
+# default_profile = "home", then BEVEL_BASE_URL creates a separate "default"
+# profile that is never used, and your edits appear to do nothing. Use one
+# mechanism, or set $env:BEVEL_PROFILE = "home" to aim the variables at it.

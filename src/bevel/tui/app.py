@@ -314,9 +314,17 @@ class BevelApp(App[None]):
 
 
 def _completion_line(event: AgentEvent, tokens: int) -> Text:
-    """The last line of a run: why it stopped, and what it cost."""
+    """The last line of a run: why it stopped, and what it cost.
+
+    A provider error also prints the exception text. The stop word alone is not
+    actionable -- "provider error" cannot tell a certificate you must trust from
+    a model name the server does not recognise, and the user has no other way to
+    find out short of reading the log.
+    """
     word, colour = _STOP_LINES.get(event.text, (event.text, "#e3b341"))
     line = Text.assemble((word, f"bold {colour}"))
+    if event.error:
+        line.append(f"  {event.error}", style="#f85149")
     if tokens:
         line.append(f"  {tokens:,} tokens", style="dim")
     return line

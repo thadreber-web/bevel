@@ -246,7 +246,12 @@ class AgentEvent:
 
     Which fields are populated depends on ``type``: ``text`` for the delta, budget and
     seam events, ``turn``/``usage`` for TURN_COMPLETE, ``executions`` for
-    TOOL_COMPLETE, ``context`` for COMPACTION.
+    TOOL_COMPLETE, ``context`` for COMPACTION, ``error`` for a COMPLETED event whose
+    stop reason was ``provider_error``.
+
+    ``error`` exists because a stop reason alone is not actionable: "provider error"
+    tells the user nothing, whereas the exception text distinguishes a certificate
+    they must trust from a model name the server does not have.
     """
 
     type: AgentEventType
@@ -256,6 +261,7 @@ class AgentEvent:
     usage: Usage | None = None
     executions: tuple[ToolExecution, ...] = ()
     context: ContextState | None = None
+    error: str | None = None
 
 
 class StopReason(StrEnum):
@@ -573,7 +579,10 @@ class Agent:
         state.usage = totals.cumulative
         state.usage_reported = totals.reported
         yield AgentEvent(
-            AgentEventType.COMPLETED, iteration=state.iterations, text=state.stop.value
+            AgentEventType.COMPLETED,
+            iteration=state.iterations,
+            text=state.stop.value,
+            error=state.error,
         )
 
     def _budget_stop(self, state: _RunState, totals: _Totals) -> tuple[StopReason, str] | None:

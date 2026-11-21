@@ -33,6 +33,9 @@ base_url = "https://a.example/v1"
 model = "model-a"
 """
 
+#: Repository root, resolved from this file's known location.
+REPO_ROOT = Path(__file__).resolve().parents[2]
+
 
 @pytest.fixture(autouse=True)
 def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -280,6 +283,23 @@ class TestRefusalToGuess:
         with pytest.raises(ConfigError) as excinfo:
             load(cwd=cwd, env={})
         assert "[profile." in str(excinfo.value)
+        assert "bevel.toml.example" in str(excinfo.value)
+
+    def test_the_shipped_example_loads(self, cwd: Path) -> None:
+        """The example is the documented way in, so it must survive the validator.
+
+        A commented-out key is invisible to the loader, so this proves only the
+        uncommented shape is accepted -- which is exactly what a user copies.
+        """
+        example = REPO_ROOT / "bevel.toml.example"
+        assert example.is_file(), "bevel.toml.example must ship with the package"
+        write(cwd / PROJECT_FILENAME, example.read_text(encoding="utf-8"))
+        config = load(cwd=cwd, env={})
+        profile = config.profiles[config.default_profile]
+        assert profile.base_url.startswith(("http://", "https://"))
+        assert profile.model
+        # No auth by default: a local vLLM/llama.cpp server needs no header.
+        assert profile.resolve_api_key() is None
 
     def test_a_file_with_no_profiles_is_still_no_config(self, cwd: Path) -> None:
         write(cwd / PROJECT_FILENAME, "unrelated = 1\n")

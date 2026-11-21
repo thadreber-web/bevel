@@ -348,13 +348,15 @@ def _no_config_message(
     return (
         "no endpoint configured. Searched:\n"
         f"{searched}\n\n"
-        "Create one with a [profile.<name>] table:\n\n"
-        '  default_profile = "home"\n\n'
+        "Create one with a [profile.<name>] table. Only base_url and model are\n"
+        "required; base_url includes the /v1 suffix, and model must match what\n"
+        "the server reports at <base_url>/models:\n\n"
         "  [profile.home]\n"
-        '  base_url = "https://gpu.local:8000/v1"\n'
-        '  model = "my-model"\n'
-        '  api_key_env = "MY_API_KEY"\n\n'
-        "Or set BEVEL_BASE_URL and BEVEL_MODEL in the environment."
+        '  base_url = "http://127.0.0.1:8000/v1"\n'
+        '  model = "Qwen2.5-Coder-32B-Instruct"\n\n'
+        "A local server usually needs no auth, so leave api_key_env out unless\n"
+        "it actually requires a bearer token. See bevel.toml.example for every\n"
+        "key, or skip the file entirely with BEVEL_BASE_URL and BEVEL_MODEL."
     )
 
 

@@ -366,6 +366,11 @@ async def test_a_mid_stream_provider_error_surfaces_visibly(
         assert any("partial answer" in line for line in lines(app))
         assert app._agent is None
         assert any("f85149" in style for style in styles(app, "provider error"))
+        # The reason, not just the word. "provider error" alone cannot tell a
+        # certificate you must trust from a model name the server lacks.
+        assert any("connection reset by peer" in line for line in lines(app)), (
+            "the provider error was reported without its reason"
+        )
 
 
 async def test_ctrl_c_cancels_the_agent_and_ends_the_run(
