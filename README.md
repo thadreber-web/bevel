@@ -143,7 +143,7 @@ Close it and the conversation is not gone: `bevel sessions` lists what is stored
 - **TUI** — `bevel` with no subcommand. A streaming transcript (markdown answers, collapsed italic reasoning), one card per tool call coloured by its outcome, a full-screen diff viewer, plan/default/auto modes, an approval dialog, and `Ctrl+C` that genuinely stops the run. Tested with Textual's Pilot against `MockProvider`.
 - **Sessions** — every turn, tool call (name, arguments, outcome, observation) and usage row is written through to SQLite as the loop goes, one commit per write, so a turn that completed survives the process. `bevel sessions` lists recent sessions with their workspace, times, turn count and token totals; `bevel resume [id]` reopens one — the transcript you see is read back from the file, and the model continues with that history. Resume trims an unusable tail (a crash between asking for calls and getting results) and says how much it dropped. The reopened transcript is verified against a real endpoint by a test that asks the model to recall a fact from the closed session.
 - **Checkpoints** — the working tree, uncommitted work-in-progress included, is committed to a `bevel/checkpoint/<session>` ref before the agent's first write, and `bevel undo` rewinds it from either the CLI or the TUI.
-- **Context management** — a project map on the model's first request, and two levels of compaction: L1 truncates stale tool observations to head+tail plus a pointer naming the call to re-run and the session holding the full text, L2 summarises the middle of the transcript and keeps the last N turns byte-identical. Both are triggered by the server's own `prompt_tokens`, never a chars/4 guess. The L3 handoff is not built — it restarts the context from todos and recalled memory that arrive with m09, and the loop says so.
+- **Context management** — a project map on the model's first request, and two levels of compaction: L1 truncates stale tool observations to head+tail plus a pointer naming the call to re-run and the session holding the full text, L2 summarises the middle of the transcript and keeps the last N turns byte-identical. Both are triggered by the server's own `prompt_tokens`, never a chars/4 guess. The L3 handoff is not built — it restarts the context from recalled memory (m09a) and todos (m09b), and the loop says so.
 - **Memory** — SQLite FTS5 from the standard library, plus optional vector recall over your server's `/embeddings`.
 - **MCP** — hand-rolled JSON-RPC over stdio and streamable-HTTP, implementing the subset that matters.
 - **Evals** — TOML task specs against a fixture repo with a seeded bug, asserting that tests pass, that the diff contains what it should, and that it stays under token and cost ceilings.
@@ -195,8 +195,9 @@ Probing, enforcement, and verification are three separate roles. `_capability.py
 | ✅ | m05 policy + approvals |
 | ✅ | m06 checkpoints |
 | ✅ | m07 TUI |
-| 🔶 | m08 context management + sessions — project map ✅, L1/L2 compaction ✅, session persistence + resume ✅; the L3 handoff remains (it lands after m09) |
-| ⬜ | m09 memory |
+| 🔶 | m08 context management + sessions — project map ✅, L1/L2 compaction ✅, session persistence + resume ✅; the L3 handoff remains (it lands after m09a + m09b) |
+| ⬜ | m09a memory store + recall |
+| ⬜ | m09b todo tool |
 | ⬜ | m10 MCP client |
 | ⬜ | m11 git + PRs |
 | ⬜ | m12 sandbox backends |
