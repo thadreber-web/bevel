@@ -15,8 +15,8 @@ from bevel.core.agent import DEFAULT_SYSTEM_PROMPT, UNBUILT_SEAMS
 
 
 def test_unbuilt_seams_is_context_only() -> None:
-    assert len(UNBUILT_SEAMS) == 1, UNBUILT_SEAMS
-    assert any("m08" in seam for seam in UNBUILT_SEAMS), UNBUILT_SEAMS
+    assert len(UNBUILT_SEAMS) == 2, UNBUILT_SEAMS
+    assert all("m08" in seam for seam in UNBUILT_SEAMS), UNBUILT_SEAMS
 
 
 @pytest.mark.parametrize("stale", ["m05", "policy", "approval", "m06", "checkpoint"])

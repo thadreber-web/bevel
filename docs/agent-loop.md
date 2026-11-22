@@ -3,10 +3,11 @@
 `core/agent.py` runs *orient → plan → act → observe* under explicit budgets, and is
 the piece every later milestone sits on. Policy (`core/policy/`) now decides every
 tool call, checkpoints (`core/checkpoint/`) snapshot the workspace before the
-first write, and the orient step (`core/context/project_map.py`) puts the repo on the
-model's first request. Budgeting and compaction (`core/context/`) still attach at the
-one seam named below. The loop stays agnostic of all three: it asks a `PolicyEvaluator`
-and records the verdict, without knowing what an engine is.
+first write, the orient step (`core/context/project_map.py`) puts the repo on the
+model's first request, and L1/L2 compaction (`core/context/compact.py`) fits an
+over-long transcript back into the window. The L3 handoff and session persistence
+still attach at the seams named below. The loop stays agnostic of all of them: it asks
+a `PolicyEvaluator` and records the verdict, without knowing what an engine is.
 
 ## Shape
 
@@ -17,8 +18,8 @@ the `StopReason`.
 
 Each iteration assembles the conversation, streams one completion, executes the tool
 calls it asked for, and appends one `role="tool"` message per call. The loop ends when
-the model answers without asking for tools, or when a budget, a cancellation, or a
-provider failure ends it.
+the model answers without asking for tools, or when a budget, a cancellation, a
+provider failure, or a transcript that will not fit the window ends it.
 
 `AgentEvent` is the one stream that carries everything the TUI (`tui/app.py`) needs: text
 deltas, tool activity, compaction, budget warnings, unbuilt seams, and the terminal
@@ -81,6 +82,41 @@ question about bevel is answered with zero tool calls. `tests/unit/test_agent_or
 and the TUI test of the same shape assert both halves: the map reached the wire, and no
 tool card appeared.
 
+## Compaction
+
+Step 8 runs after each batch of tool calls. Its trigger is the server's own
+`prompt_tokens` from the last request against `Capabilities.max_model_len` — never a
+chars/4 estimate, because the target endpoint has no `/tokenize` to predict with (see
+`docs/provider-notes.md`). When either number is unknown the step does nothing and
+says so in the `COMPACTION` event: the loop refuses to invent a window size, so it
+does not guess one here either.
+
+`core/context/compact.py` holds the two levels that exist:
+
+- **L1** cuts tool observations over `MIN_OBSERVATION_CHARS` to head + tail plus a
+  pointer. Pure string work — no model call, no I/O, no new dependency, and the same
+  transcript always compacts to the same bytes. The dropped text is not stored
+  anywhere (that is session persistence, a later slice), so the replacement names the
+  originating call and its arguments and tells the model to re-run it.
+- **L2** replaces the middle of the transcript with one summary and leaves the last
+  `KEEP_RECENT_TURNS` turns byte-identical. It costs a generation, which is why the
+  loop tries L1 first and escalates only when L1 has nothing left to give. The
+  summariser is `Agent(summariser=...)` if one was passed, otherwise the loop's own
+  provider — there is no second endpoint in the config, so there is no second endpoint
+  here. The `COMPACTION` text names the model that summarised.
+
+Escalation is cheapest-first and one pass per over-budget measurement, so compaction
+is not a per-iteration tax. A level that changed nothing is exhausted — both levels
+are idempotent, which is what makes "changed nothing" a reliable signal. When L1 and
+L2 are both exhausted the run stops with `StopReason.CONTEXT_OVERFLOW` rather than
+sending a request the server is known to reject; the error names the levels reached,
+the token count, the window, and the L3 handoff that would recover and is not built.
+
+Both levels cut only at turn-group boundaries and never touch `messages[0]`, the
+system message that carries the project map. A run that silently went unoriented
+after compaction would be worse than one that ran out of context, so the tests assert
+the map is still there after each level.
+
 ## Unbuilt seams
 
 `UNBUILT_SEAMS` is the list of capabilities the loop would use but does not have yet.
@@ -89,7 +125,12 @@ loop never fakes the behaviour it stands in for:
 
 | Seam | Arrives with |
 |---|---|
-| Context budgeting, L1/L2/L3 compaction, session persistence | m08 (later slices) |
+| L3 compaction — restart the context from the project map, todos and recalled memory | m09, which supplies the todos and memory it needs |
+| Session persistence and resume — reopen a closed session, and read back the text L1 dropped | m08 (slice 3) |
+
+L1 and L2 are **not** in this list: they run, and their `COMPACTION` events carry the
+numbers that prove it. L3 is absent from the code entirely — no function, no enum
+variant, no placeholder that returns the transcript unchanged.
 
 A `CHECKPOINT` event is emitted once per run, before the first batch that writes to the
 workspace. Its text is the truth of what happened: either the session's checkpoint

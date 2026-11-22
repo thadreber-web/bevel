@@ -15,11 +15,15 @@ One iteration is:
 Step 7 takes the session's checkpoint commit before the first batch that writes (see
 :mod:`bevel.core.checkpoint`). Step 1 now orients: the project map from
 :mod:`bevel.core.context.project_map` goes on the wire before the first completion, so
-the model knows the layout without spending a tool call discovering it. What is still
-missing from steps 1 and 8 — fitting the context to a budget, and compacting it — is
-named in :data:`UNBUILT_SEAMS`, reported on every :class:`AgentResult`, and logged once
-per run. Nothing here pretends to compact a transcript. Policy (step 4) is enforced by
-:class:`~bevel.core.policy.PolicyEngine`.
+the model knows the layout without spending a tool call discovering it. Step 8 now
+compacts: when the server's own ``prompt_tokens`` come back over
+``Capabilities.max_model_len``, L1 truncates stale tool observations and, if that is
+not enough, L2 summarises the middle of the transcript (see
+:mod:`bevel.core.context.compact`). What is still missing from steps 1 and 8 — saving
+a session so it can be resumed, and the L3 handoff that recovers when L1 and L2 cannot
+fit the transcript — is named in :data:`UNBUILT_SEAMS`, reported on every
+:class:`AgentResult`, and logged once per run. Nothing here pretends to do what it
+cannot. Policy (step 4) is enforced by :class:`~bevel.core.policy.PolicyEngine`.
 
 Cancellation
 ------------
@@ -58,6 +62,7 @@ from typing import Any, Final
 
 from bevel.config.schema import PolicyConfig
 from bevel.core.checkpoint import snapshot
+from bevel.core.context.compact import compact_l1, compact_l2
 from bevel.core.context.project_map import build_project_map
 from bevel.core.messages import Message, ToolCall
 from bevel.core.policy import (
@@ -111,14 +116,19 @@ __all__ = [
 #: How many parallel-safe tool calls may be in flight at once.
 DEFAULT_CONCURRENCY: Final[int] = 4
 
-_SEAM_CONTEXT: Final[str] = (
-    "m08 (context budgeting, L1/L2/L3 compaction, session persistence) is not built: "
-    "the project map orients the first request, but the transcript is afterwards never "
-    "summarised, truncated, or saved — it only grows"
+_SEAM_PERSISTENCE: Final[str] = (
+    "m08 (session persistence and resume) is not built: a closed session cannot be "
+    "reopened, and the text compaction drops from a long observation is not saved "
+    "anywhere — the replacement tells the model which call to re-run instead"
+)
+_SEAM_L3: Final[str] = (
+    "m08 (L3 compaction) is not built: when L1 and L2 cannot fit the transcript in the "
+    "window the run stops with context_overflow, rather than restarting the context from "
+    "the project map, todos and recalled memory. m09 supplies the todos and memory it needs"
 )
 
 #: What this loop does *not* do, in the words the loop itself reports.
-UNBUILT_SEAMS: Final[tuple[str, ...]] = (_SEAM_CONTEXT,)
+UNBUILT_SEAMS: Final[tuple[str, ...]] = (_SEAM_PERSISTENCE, _SEAM_L3)
 
 DEFAULT_SYSTEM_PROMPT: Final[str] = (
     "You are bevel, a coding agent working in a local workspace.\n"
@@ -139,6 +149,17 @@ DEFAULT_SYSTEM_PROMPT: Final[str] = (
     "run. Policy is enforced: reads and workspace writes proceed, and anything "
     "the policy engine decides needs your approval is refused unless an approver is "
     "installed. Say what you need instead of assuming you have it."
+)
+
+#: What L2's summariser is told to do. Kept out of the loop so the one place that
+#: asks for a summary is the one place that says what a summary is for.
+SUMMARY_SYSTEM: Final[str] = (
+    "You are compacting an agent transcript. Summarise the conversation you are given "
+    "so that the agent can continue from your summary alone. State as facts: the task "
+    "asked for; what each tool call was for and what it established; every file, path, "
+    "symbol, command and number the agent has actually seen; what is settled; and what "
+    "is still unresolved. Be dense and literal. Do not add advice, do not speculate "
+    "about anything not in the transcript, and do not answer the task yourself."
 )
 
 
@@ -281,6 +302,7 @@ class StopReason(StrEnum):
     TOKEN_BUDGET = "token_budget"  # noqa: S105
     CANCELLED = "cancelled"
     PROVIDER_ERROR = "provider_error"
+    CONTEXT_OVERFLOW = "context_overflow"
 
 
 @dataclass(frozen=True)
@@ -386,8 +408,18 @@ class _Totals:
         self.context_tokens: int | None = None
         self.reported = True
 
-    def add(self, usage: Usage) -> None:
-        if not (usage.total_tokens or usage.prompt_tokens or usage.completion_tokens):
+    def add(self, usage: Usage, counts_as_context: bool = True) -> None:
+        """Fold one request's server-reported usage into the run.
+
+        ``counts_as_context`` is False for a request that was not the next thing
+        the model would have seen — L2's summariser call. Its prompt tokens are
+        the size of the middle being summarised, not of the next request, so
+        counting them as the context size would report a window reading the loop
+        never sent. They still count against what the run cost.
+        """
+        if counts_as_context and not (
+            usage.total_tokens or usage.prompt_tokens or usage.completion_tokens
+        ):
             self.reported = False
         self.cumulative = Usage(
             prompt_tokens=self.cumulative.prompt_tokens + usage.prompt_tokens,
@@ -395,7 +427,7 @@ class _Totals:
             reasoning_tokens=self.cumulative.reasoning_tokens + usage.reasoning_tokens,
             total_tokens=self.cumulative.total_tokens + usage.total_tokens,
         )
-        if usage.prompt_tokens:
+        if usage.prompt_tokens and counts_as_context:
             self.context_tokens = usage.prompt_tokens
 
     def over_budget(self, limit: int | None) -> bool:
@@ -448,6 +480,7 @@ class Agent:
         policy_config: PolicyConfig | None = None,
         approver: Approver | None = None,
         repairer: ToolCallRepairer | None = None,
+        summariser: ModelProvider | None = None,
     ) -> None:
         if budgets.max_iterations < 1:
             raise ValueError("max_iterations must be at least 1")
@@ -463,6 +496,7 @@ class Agent:
         self.tools: tuple[Tool, ...] = tuple(tools) if tools is not None else tuple(builtin_tools())
         self._by_name: dict[str, Tool] = {tool.spec.name: tool for tool in self.tools}
         self._repairer = repairer or ToolCallRepairer(provider)
+        self._summariser = summariser
         self._policy: PolicyEvaluator = policy or PolicyEngine(
             self.ctx,
             config=policy_config,
@@ -575,7 +609,9 @@ class Agent:
 
                 async for event in self._run_tools(turn, state, totals):
                     yield event
-                if self._cancel_event.is_set():
+                # Either the user stopped the run or compaction could not fit the
+                # transcript; both mean there is no point asking the model again.
+                if self._cancel_event.is_set() or state.stop is StopReason.CONTEXT_OVERFLOW:
                     break
         except ProviderError as exc:
             state.stop = StopReason.PROVIDER_ERROR
@@ -702,15 +738,118 @@ class Agent:
                 state.messages.append(Message.tool_result(execution.call.id, execution.observation))
         state.tool_calls += len(pending)
 
-        context = totals.context_state(self.provider.capabilities.max_model_len)
-        yield AgentEvent(
-            AgentEventType.COMPACTION,
-            iteration=state.iterations,
-            context=context,
-            text=(
-                f"{context.status.value}: {context.prompt_tokens} prompt tokens against "
-                f"a window of {context.window}; nothing compacted ({_SEAM_CONTEXT})"
+        event, stop = await self._compact(state, totals)
+        if stop is not None:
+            state.stop = stop
+        yield event
+
+    async def _compact(
+        self, state: _RunState, totals: _Totals
+    ) -> tuple[AgentEvent, StopReason | None]:
+        """Step 8: fit the transcript back into the window, cheapest level first.
+
+        The trigger is the server's own ``prompt_tokens`` from the last request
+        against ``Capabilities.max_model_len``. When either is unknown the loop does
+        nothing and says so — it refuses to invent a window size, so it must not
+        start guessing one here either.
+
+        L1 is free and deterministic, so it goes first. L2 costs a generation and is
+        only tried once L1 has nothing left to give. A level that changed nothing is
+        exhausted, and when both are exhausted the run stops with CONTEXT_OVERFLOW
+        rather than sending a request the server is known to reject: the recovery
+        from here is the L3 handoff, and L3 is not built.
+
+        One escalation per over-budget measurement. A level that did real work lets
+        the next request go out and the server re-measure it, because there is no
+        way to count the new transcript locally.
+        """
+        window = self.provider.capabilities.max_model_len
+        context = totals.context_state(window)
+        size = (
+            "no server prompt_tokens"
+            if context.prompt_tokens is None
+            else f"{context.prompt_tokens} prompt tokens"
+        )
+        against = f"{size} against a window of {window}"
+        if context.status is CompactionStatus.UNKNOWN:
+            why = (
+                "the server reported no context window"
+                if window is None
+                else "the server reported no prompt_tokens"
+            )
+            return (
+                AgentEvent(
+                    AgentEventType.COMPACTION,
+                    iteration=state.iterations,
+                    context=context,
+                    text=f"unknown: {why}; nothing compacted",
+                ),
+                None,
+            )
+        if context.status is CompactionStatus.WITHIN_BUDGET:
+            return (
+                AgentEvent(
+                    AgentEventType.COMPACTION,
+                    iteration=state.iterations,
+                    context=context,
+                    text=f"within_budget: {against}; nothing to compact",
+                ),
+                None,
+            )
+
+        l1 = compact_l1(state.messages)
+        if l1.changed:
+            state.messages[:] = l1.messages
+            text = (
+                f"l1: cut {l1.observations_cut} observation(s) to head+tail, removed "
+                f"{l1.chars_removed} chars; {against}"
+            )
+        else:
+            summariser = self._summariser or self.provider
+            model = summariser.model
+
+            async def summarise(middle: Sequence[Message]) -> str:
+                turn = await summariser.complete(
+                    [Message.system(SUMMARY_SYSTEM), *middle], None, self.options
+                )
+                # The summariser's prompt is the size of the middle, not of the next
+                # request, so it counts against the run but not as the context size.
+                totals.add(turn.usage or Usage(), counts_as_context=False)
+                return turn.message.content
+
+            l2 = await compact_l2(state.messages, summarise)
+            if not l2.changed:
+                state.stop = StopReason.CONTEXT_OVERFLOW
+                state.error = (
+                    f"transcript will not fit: l1 and l2 left {against}. The L3 handoff that "
+                    "would restart the context from the project map, todos and recalled memory "
+                    "is not built (m09 supplies its inputs)."
+                )
+                logger.warning("compaction exhausted: %s", state.error)
+                return (
+                    AgentEvent(
+                        AgentEventType.COMPACTION,
+                        iteration=state.iterations,
+                        context=context,
+                        text=f"l1: nothing left to cut; l2: no progress; {against}",
+                    ),
+                    StopReason.CONTEXT_OVERFLOW,
+                )
+            state.messages[:] = l2.messages
+            head = "l1: nothing left to cut; " if l1.chars_removed == 0 else ""
+            text = (
+                f"{head}l2: summarised {l2.turns_replaced} turn(s) into {len(l2.summary)} chars, "
+                f"removed {l2.chars_removed} chars (summarised by {model}); {against}"
+            )
+        logger.info("compacted: %s", text)
+        return (
+            AgentEvent(
+                AgentEventType.COMPACTION,
+                iteration=state.iterations,
+                context=context,
+                text=text,
             ),
+            None,
         )
 
     async def _prepare(

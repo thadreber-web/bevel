@@ -35,7 +35,9 @@ from __future__ import annotations
 import asyncio
 import subprocess
 import time
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Iterator, Mapping
+from contextlib import contextmanager
+from dataclasses import replace
 from pathlib import Path
 from typing import Final, TypeVar
 
@@ -49,6 +51,7 @@ from bevel.core.agent import (
     AgentResult,
     Budgets,
     StopReason,
+    ToolExecution,
     ToolOutcome,
 )
 from bevel.core.checkpoint import list_checkpoints
@@ -98,6 +101,27 @@ def _requires_tools(endpoint: ModelProvider) -> None:
 
 def _events(result: AgentResult, type_: AgentEventType) -> list[AgentEvent]:
     return [event for event in result.events if event.type is type_]
+
+
+def _executions(result: AgentResult) -> list[ToolExecution]:
+    return [
+        execution
+        for event in _events(result, AgentEventType.TOOL_COMPLETE)
+        for execution in event.executions
+    ]
+
+
+def _context_was_measured(result: AgentResult) -> bool:
+    """Did the server ever tell the loop how full the context was?
+
+    A server that omits ``usage`` leaves the loop honestly ignorant, and compaction
+    correctly does nothing. Asserting on a level that could not run would be testing
+    a number nobody had, so the tests that need a measurement skip on this instead.
+    """
+    return any(
+        event.context is not None and event.context.status.value != "unknown"
+        for event in _events(result, AgentEventType.COMPACTION)
+    )
 
 
 _T = TypeVar("_T")
@@ -388,18 +412,18 @@ async def test_an_unknown_tool_is_answered_not_hung(
 async def test_unbuilt_seams_are_reported_on_every_result(
     endpoint: ModelProvider, workspace: Path
 ) -> None:
-    """m08 is not built and the loop must say so on the way out.
+    """What the loop does not do must ride out with every result.
 
     This is the anti-fake guarantee: a caller that never reads the docs still learns
-    that nothing compacted. Policy is enforced and checkpoints are taken, so neither
-    is among the seams the loop reports.
+    that a closed session cannot be reopened and that the L3 handoff does not exist.
+    Policy is enforced and checkpoints are taken, so neither is among the seams.
     """
     agent = Agent(endpoint, workspace, budgets=Budgets(max_iterations=1), options=GEN)
     result = await agent.run("Say ok.")
 
     assert result.seams == UNBUILT_SEAMS
-    assert len(result.seams) == 1
-    assert any("m08" in seam for seam in result.seams)
+    assert len(result.seams) == 2
+    assert all("m08" in seam for seam in result.seams)
 
 
 async def test_compaction_reports_the_servers_own_context_size(
@@ -420,7 +444,6 @@ async def test_compaction_reports_the_servers_own_context_size(
     assert compactions, "every tool iteration must report the context state"
     for event in compactions:
         assert event.context is not None
-        assert "m08" in event.text, event.text
     if endpoint.capabilities.max_model_len is None:
         assert all(event.context.status.value == "unknown" for event in compactions), (
             "no window was reported, so nothing may claim the context fits"
@@ -429,6 +452,114 @@ async def test_compaction_reports_the_servers_own_context_size(
         assert all(
             event.context.window == endpoint.capabilities.max_model_len for event in compactions
         )
+
+
+# --------------------------------------------------------------------- compaction
+
+
+@contextmanager
+def _tiny_window(endpoint: ModelProvider, tokens: int) -> Iterator[ModelProvider]:
+    """Pretend the endpoint's window is ``tokens`` wide, then put it back.
+
+    The window is what the server reported, and a real model's system prompt plus
+    project map is already over a few hundred tokens, so this is enough to make the
+    server's own ``prompt_tokens`` exceed it. Nothing here counts tokens locally:
+    the loop still only ever reads the number the server sent back.
+    """
+    original = endpoint.capabilities
+    endpoint.capabilities = replace(original, max_model_len=tokens)
+    try:
+        yield endpoint
+    finally:
+        endpoint.capabilities = original
+
+
+async def test_l1_against_a_real_endpoint_cuts_and_points_at_the_call(
+    endpoint: ModelProvider, workspace: Path
+) -> None:
+    """L1 on real observations: head+tail plus a pointer, and a number in the event.
+
+    The window is forced small so the server's own count trips the trigger. The
+    file is long so L1 has something to cut. What is asserted is mechanical: the
+    event names the level and the characters removed, and the observation the model
+    was then shown is a truncation of the real file that names the call to re-run.
+    """
+    _requires_tools(endpoint)
+    (workspace / "long.txt").write_text(
+        "\n".join(f"line {n} {'pad' * 20}" for n in range(600)), encoding="utf-8"
+    )
+
+    with _tiny_window(endpoint, 200) as small:
+
+        async def attempt() -> AgentResult:
+            agent = Agent(small, workspace, budgets=Budgets(max_iterations=4), options=GEN)
+            return await agent.run("Read long.txt and tell me how many lines it has.")
+
+        def volunteered(result: AgentResult) -> bool:
+            return any(execution.name == "read" for execution in _executions(result))
+
+        result = await _asking_for_tools(attempt, volunteered, "read the long file")
+
+    if not _context_was_measured(result):
+        pytest.skip(
+            f"{endpoint.model!r} returned no usage for any request, so the loop "
+            "honestly knows nothing about its context size and cannot trigger compaction"
+        )
+
+    compactions = _events(result, AgentEventType.COMPACTION)
+    work = [event for event in compactions if "l1:" in event.text]
+    assert work, [event.text for event in compactions]
+    assert any("observation(s) to head+tail" in event.text for event in work), work
+    assert any("chars" in event.text for event in work), work
+
+    # The model was shown a truncation of the real file, not a made-up stub: the
+    # head is genuine file content and the pointer names the call that produced it.
+    observations = [m.content for m in result.messages if m.role == "tool"]
+    assert observations
+    cut = [o for o in observations if "L1 compaction" in o]
+    assert cut, observations
+    assert any("line 0 " in o for o in cut)
+    assert any("Re-run read(" in o for o in cut)
+
+
+async def test_a_window_nothing_can_fit_stops_with_context_overflow(
+    endpoint: ModelProvider, workspace: Path
+) -> None:
+    """When L1 and L2 cannot help, the run stops instead of being sent.
+
+    One short observation and one turn: L1 has nothing long enough to cut and there
+    is no middle for L2 to summarise, so both levels are exhausted on the first
+    over-budget measurement. The request the server would have rejected is never
+    made, and the error names the L3 handoff that would recover and does not exist.
+    """
+    _requires_tools(endpoint)
+
+    with _tiny_window(endpoint, 200) as small:
+
+        async def attempt() -> AgentResult:
+            agent = Agent(small, workspace, budgets=Budgets(max_iterations=6), options=GEN)
+            return await agent.run("Read notes.txt and tell me the access word.")
+
+        def volunteered(result: AgentResult) -> bool:
+            return any(execution.name == "read" for execution in _executions(result))
+
+        result = await _asking_for_tools(attempt, volunteered, "read the notes file")
+
+    if not _context_was_measured(result):
+        pytest.skip(
+            f"{endpoint.model!r} returned no usage for any request, so the loop "
+            "honestly knows nothing about its context size and cannot trigger compaction"
+        )
+
+    assert result.stop_reason is StopReason.CONTEXT_OVERFLOW, result.error
+    assert result.error is not None
+    assert "l1 and l2" in result.error
+    assert "L3" in result.error
+    assert "not built" in result.error
+    assert any(
+        "prompt tokens" in event.text for event in _events(result, AgentEventType.COMPACTION)
+    )
+    _assert_transcript_is_wellformed(result)
 
 
 # -------------------------------------------------------------------------- budgets

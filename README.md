@@ -140,7 +140,7 @@ That opens the TUI over the current directory. `f2` cycles plan → default → 
 - **Tiered approvals** — `READ` free, `WRITE_WORKSPACE` ask, `WRITE_OUTSIDE` always ask, `EXEC_SAFE` free once allowlisted, `EXEC_UNSAFE` ask, `EXEC_DESTRUCTIVE` always ask with typed confirmation, `NETWORK_EGRESS` ask. Rules are learnable and every decision is logged with the rule that produced it. Checkpoints run even under `--yolo`.
 - **TUI** — `bevel` with no subcommand. A streaming transcript (markdown answers, collapsed italic reasoning), one card per tool call coloured by its outcome, a full-screen diff viewer, plan/default/auto modes, an approval dialog, and `Ctrl+C` that genuinely stops the run. Tested with Textual's Pilot against `MockProvider`.
 - **Checkpoints** — the working tree, uncommitted work-in-progress included, is committed to a `bevel/checkpoint/<session>` ref before the agent's first write, and `bevel undo` rewinds it from either the CLI or the TUI.
-- **Context management** — budgeted assembly, three-level compaction, a project map.
+- **Context management** — a project map on the model's first request, and two levels of compaction: L1 truncates stale tool observations to head+tail plus a pointer naming the call to re-run, L2 summarises the middle of the transcript and keeps the last N turns byte-identical. Both are triggered by the server's own `prompt_tokens`, never a chars/4 guess. The L3 handoff is not built — it restarts the context from todos and recalled memory that arrive with m09, and the loop says so.
 - **Memory** — SQLite FTS5 from the standard library, plus optional vector recall over your server's `/embeddings`.
 - **MCP** — hand-rolled JSON-RPC over stdio and streamable-HTTP, implementing the subset that matters.
 - **Evals** — TOML task specs against a fixture repo with a seeded bug, asserting that tests pass, that the diff contains what it should, and that it stays under token and cost ceilings.
@@ -192,7 +192,7 @@ Probing, enforcement, and verification are three separate roles. `_capability.py
 | ✅ | m05 policy + approvals |
 | ✅ | m06 checkpoints |
 | ✅ | m07 TUI |
-| ⬜ | m08 context management + sessions |
+| 🔶 | m08 context management + sessions — project map ✅, L1/L2 compaction ✅; session persistence + resume and the L3 handoff remain (L3 lands after m09) |
 | ⬜ | m09 memory |
 | ⬜ | m10 MCP client |
 | ⬜ | m11 git + PRs |

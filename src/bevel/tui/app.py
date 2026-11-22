@@ -86,6 +86,7 @@ _STOP_LINES: Final[dict[str, tuple[str, str]]] = {
     "turn_budget": ("stopped: iteration or tool-call budget", "#e3b341"),
     "token_budget": ("stopped: token budget", "#e3b341"),
     "provider_error": ("provider error", "#f85149"),
+    "context_overflow": ("stopped: context would not fit", "#f85149"),
 }
 
 

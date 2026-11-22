@@ -29,7 +29,7 @@ from bevel.core.agent import UNBUILT_SEAMS, Agent
 from bevel.core.checkpoint import snapshot
 from bevel.core.messages import Message
 from bevel.core.tools.types import ToolSpec
-from bevel.providers.base import ContentDelta, GenOptions, ProviderError, StreamEvent
+from bevel.providers.base import Capabilities, ContentDelta, GenOptions, ProviderError, StreamEvent
 from bevel.providers.mock import MockProvider, ScriptedTurn, tool_call
 from bevel.tui.app import ApprovalScreen, BevelApp, RunMode
 from bevel.tui.widgets.diff_viewer import DiffScreen, DiffView
@@ -612,3 +612,99 @@ async def test_the_palette_runs_a_command(make_app: Callable[..., BevelApp]) -> 
 
 def _card_styles(card: ToolCard) -> list[str]:
     return [str(span.style) for span in card.content.spans]
+
+
+# ------------------------------------------------------------------- compaction
+
+
+def _context_lines(app: BevelApp) -> list[str]:
+    """The transcript's compaction lines, which the app labels ``context``."""
+    return [line for line in lines(app) if line.startswith("context")]
+
+
+def _context_app(tmp_path: Path, *turns: ScriptedTurn, window: int | None = 100) -> BevelApp:
+    """An app whose provider reports a deliberately tiny context window.
+
+    The loop trusts the server's own ``prompt_tokens`` against the server's own
+    ``max_model_len``, so scripting both is the whole apparatus -- no tokeniser,
+    no endpoint.
+    """
+    provider = MockProvider(turns=list(turns))
+    provider.capabilities = Capabilities(max_model_len=window, supports_tools=True)
+    policy = PolicyConfig(mode=PolicyMode.AUTO, db_path=tmp_path / "policy.db")
+    return BevelApp(provider=provider, workspace=tmp_path, policy=policy, mode=RunMode.AUTO)
+
+
+async def test_a_long_run_shows_a_context_line_naming_its_level(tmp_path: Path) -> None:
+    """The transcript says *which* level ran and *how much* it removed.
+
+    A line that just said "context compacted" would be the UI claiming work the
+    loop may not have done, so the level and the number have to be visible.
+    """
+    (tmp_path / "big.txt").write_text(
+        "\n".join(f"line {n} {'x' * 60}" for n in range(400)), encoding="utf-8"
+    )
+    turns = [
+        ScriptedTurn(
+            content=f"looking at {n} " + "y" * 300,
+            tool_calls=[tool_call(f"c{n}", "read", {"path": "big.txt", "limit": 400})],
+            prompt_tokens=0,
+        )
+        for n in range(1, 7)
+    ]
+    turns[5] = ScriptedTurn(
+        content="looking at 6 " + "y" * 300,
+        tool_calls=[tool_call("c6", "read", {"path": "big.txt", "limit": 400})],
+        prompt_tokens=900,
+    )
+    turns.append(ScriptedTurn(content="done", prompt_tokens=900))
+    app = _context_app(tmp_path, *turns)
+
+    async with app.run_test() as pilot:
+        await submit(pilot, "read the big file a lot")
+        assert await settle(pilot, lambda: _context_lines(app), timeout_s=20.0)
+        context = _context_lines(app)
+
+    assert context, "no context line was written"
+    assert any(("l1:" in line or "l2:" in line) for line in context), context
+    assert any("chars" in line for line in context), context
+
+
+async def test_the_l3_handoff_is_announced_as_not_built_on_mount(tmp_path: Path) -> None:
+    """Mount says the L3 handoff does not exist, before anyone asks."""
+    app = _context_app(tmp_path, ScriptedTurn(content="hi"))
+    async with app.run_test() as pilot:
+        assert await settle(pilot, lambda: len(lines(app)) >= len(UNBUILT_SEAMS))
+        shown = lines(app)
+
+    l3 = [line for line in shown if "l3" in line.lower()]
+    assert l3, shown
+    assert all("not built" in line for line in l3)
+    assert any("context_overflow" in line for line in l3)
+
+
+async def test_a_context_overflow_stops_the_run_with_a_readable_line(tmp_path: Path) -> None:
+    """The stop line is the user's only notice that the run was cut short.
+
+    One turn with one short observation: L1 has nothing to cut and there is no
+    middle for L2 to summarise, so both levels are exhausted on the first
+    over-budget measurement and the run must stop rather than be sent.
+    """
+    (tmp_path / "small.txt").write_text("one\ntwo\n", encoding="utf-8")
+    app = _context_app(
+        tmp_path,
+        ScriptedTurn(
+            content="thinking " + "y" * 2000,
+            tool_calls=[tool_call("c1", "read", {"path": "small.txt"})],
+            prompt_tokens=900,
+        ),
+    )
+    async with app.run_test() as pilot:
+        await submit(pilot, "do something long")
+        assert await settle(
+            pilot, lambda: any("would not fit" in line for line in lines(app)), timeout_s=20.0
+        )
+        shown = lines(app)
+
+    assert any("stopped: context would not fit" in line for line in shown), shown
+    assert any("L3" in line for line in shown), shown
