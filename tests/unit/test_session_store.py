@@ -13,6 +13,7 @@ the database, because a mocked SQLite proves nothing about SQLite.
 from __future__ import annotations
 
 import dataclasses
+import os
 import sqlite3
 from pathlib import Path
 
@@ -283,16 +284,51 @@ class TestLatestForWorkspace:
         store.create_session(workspace=tmp_path / "elsewhere", provider="p", model="m")
         assert store.latest_session_id(tmp_path / "nowhere") is None
 
-    def test_workspace_matching_ignores_case_and_separators(
+    def test_a_differently_spelled_workspace_is_the_same_workspace(
+        self, store: SessionStore, tmp_path: Path
+    ) -> None:
+        """A workspace typed a different way is still the same workspace.
+
+        Only spellings that mean the same path on *every* platform are asserted
+        here; case and separators are platform-specific and tested separately.
+        """
+        workspace = tmp_path / "Repo"
+        workspace.mkdir()
+        info = store.create_session(workspace=workspace, provider="p", model="m")
+        variants = [
+            str(workspace),
+            str(workspace) + os.sep,
+            str(Path(str(workspace), os.pardir, workspace.name)),
+        ]
+        for variant in variants:
+            assert store.latest_session_id(Path(variant)) == info.id, variant
+
+    @pytest.mark.skipif(os.name != "nt", reason="POSIX paths are case-sensitive")
+    def test_windows_workspace_matching_ignores_case_and_separators(
         self, store: SessionStore, tmp_path: Path
     ) -> None:
         """Windows paths arrive as the user typed them; matching must not be literal."""
         workspace = tmp_path / "Repo"
         workspace.mkdir()
         info = store.create_session(workspace=workspace, provider="p", model="m")
-        variants = [str(workspace), str(workspace).upper(), str(workspace).replace("\\", "/")]
+        variants = [str(workspace).upper(), str(workspace).replace("\\", "/")]
         for variant in variants:
             assert store.latest_session_id(Path(variant)) == info.id, variant
+
+    @pytest.mark.skipif(os.name == "nt", reason="Windows paths are case-insensitive")
+    def test_a_different_case_is_a_different_workspace_on_posix(
+        self, store: SessionStore, tmp_path: Path
+    ) -> None:
+        """``normcase`` is the identity here, so case is part of the identity.
+
+        The upper-cased spelling really is a different directory on POSIX, and
+        claiming it was the same session would let ``bevel resume`` reopen
+        someone else's history.
+        """
+        workspace = tmp_path / "Repo"
+        workspace.mkdir()
+        store.create_session(workspace=workspace, provider="p", model="m")
+        assert store.latest_session_id(Path(str(workspace).upper())) is None
 
 
 class TestSessionInfoShape:
