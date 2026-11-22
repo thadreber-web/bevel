@@ -39,11 +39,22 @@ from textual.screen import ModalScreen
 from textual.widget import Widget
 from textual.widgets import Footer, Header, Input, Static
 
-from bevel.config.loader import capability_cache_path, load
+from bevel.config.loader import capability_cache_path, load, session_db_path
 from bevel.config.schema import ConfigError, PolicyConfig, PolicyMode
-from bevel.core.agent import UNBUILT_SEAMS, Agent, AgentEvent, AgentEventType
+from bevel.core.agent import (
+    UNBUILT_SEAMS,
+    Agent,
+    AgentEvent,
+    AgentEventType,
+    ToolExecution,
+    ToolOutcome,
+)
 from bevel.core.checkpoint import list_checkpoints, restore
+from bevel.core.messages import ToolCall
 from bevel.core.policy.approvals import Approval, ApprovalRequest, Approver, Decision
+from bevel.core.session.resume import ResumedSession, rebuild_transcript
+from bevel.core.session.store import SessionStore, StoredToolCall
+from bevel.core.tools.base import ToolResult
 from bevel.providers.base import ModelProvider
 from bevel.providers.registry import Registry
 from bevel.tui.widgets.tool_cards import ToolCard
@@ -118,12 +129,16 @@ class BevelApp(App[None]):
         workspace: Path | str | None = None,
         policy: PolicyConfig | None = None,
         mode: RunMode = RunMode.DEFAULT,
+        store: SessionStore | None = None,
+        resume: ResumedSession | None = None,
     ) -> None:
         super().__init__()
         self.provider = provider
         self.workspace = Path(workspace) if workspace is not None else Path.cwd()
         self.policy = policy if policy is not None else PolicyConfig()
         self.mode = mode
+        self.store = store
+        self.resume = resume
         self._agent: Agent | None = None
         self._content: ContentBlock | None = None
         self._reasoning: ReasoningBlock | None = None
@@ -141,9 +156,50 @@ class BevelApp(App[None]):
     def on_mount(self) -> None:
         self.title = "bevel"
         self._refresh_title()
+        if self.resume is not None:
+            self._show_resumed()
         for seam in UNBUILT_SEAMS:
             self._write(Text.assemble(("not built  ", "bold #bc8cff"), seam))
         self.query_one("#task", Input).focus()
+
+    def _show_resumed(self) -> None:
+        """Render the transcript that was read back from the store.
+
+        The lines below come out of ``sessions.db``, not out of anything this
+        process remembers -- which is the whole point of resume.
+        """
+        resumed = self.resume
+        assert resumed is not None
+        head = Text.assemble(
+            ("resumed  ", "bold #3fb950"),
+            f"{resumed.session.id} - {resumed.session.workspace}"
+            f" ({resumed.turns} stored message(s), {resumed.session.total_tokens:,} tokens)",
+        )
+        self._write(head)
+        if resumed.dropped:
+            self._write(
+                Text.assemble(
+                    ("dropped  ", "bold #e3b341"),
+                    f"{resumed.dropped} trailing message(s) left the last run incomplete"
+                    " (a tool call with no result); they are still in the store",
+                )
+            )
+        for turn in resumed.stored:
+            if turn.role == "user":
+                self._write(Text.assemble(("you  ", "bold #58a6ff"), turn.content))
+                continue
+            if turn.role == "assistant":
+                if turn.reasoning:
+                    reasoning = ReasoningBlock()
+                    self._mount(reasoning)
+                    reasoning.append(turn.reasoning)
+                if turn.content:
+                    content = ContentBlock()
+                    self._mount(content)
+                    content.append(turn.content)
+                for call in turn.tool_calls:
+                    self._mount(ToolCard(_stored_execution(call)))
+        self._write(Text("the model has this history; anything you ask continues from it", "dim"))
 
     def _refresh_title(self) -> None:
         self.sub_title = f"{self.provider.name}/{self.provider.model} - {self.mode} mode"
@@ -219,6 +275,8 @@ class BevelApp(App[None]):
             self.workspace,
             policy_config=replace(self.policy, mode=self._policy_mode()),
             approver=self._approver(),
+            store=self.store,
+            resume=self.resume,
         )
         self._agent = agent
         try:
@@ -227,6 +285,18 @@ class BevelApp(App[None]):
         finally:
             self._agent = None
             self._end_blocks()
+        self._continue_from_store(agent)
+
+    def _continue_from_store(self, agent: Agent) -> None:
+        """Point the next task at what this run just wrote, not at what it remembers.
+
+        Rebuilding from the store after every run keeps one source of truth for
+        the conversation, so a task submitted after a crash continues from the
+        turns that actually made it to disk.
+        """
+        if self.store is None or agent.session_id is None:
+            return
+        self.resume = rebuild_transcript(self.store, agent.session_id)
 
     def _policy_mode(self) -> PolicyMode:
         return PolicyMode.AUTO if self.mode is RunMode.AUTO else PolicyMode.ASK
@@ -312,6 +382,22 @@ class BevelApp(App[None]):
         if result.untracked:
             detail += f"; left {len(result.untracked)} untracked file(s) in place"
         self._write(Text.assemble(("undo  ", "bold #3fb950"), detail))
+
+
+def _stored_execution(call: StoredToolCall) -> ToolExecution:
+    """A stored call, dressed as an execution so the card can render it.
+
+    Resume only ever hands back groups in which every call has a result, so the
+    stored outcome is always one of ``ToolOutcome``'s values.
+    """
+    return ToolExecution(
+        call=ToolCall(id=call.call_id, name=call.name, arguments=call.arguments),
+        tool=None,
+        outcome=ToolOutcome(call.outcome),
+        result=ToolResult(ok=call.outcome == ToolOutcome.OK.value, content=call.observation),
+        fixes=call.fixes,
+        reason=call.reason,
+    )
 
 
 def _completion_line(event: AgentEvent, tokens: int) -> Text:
@@ -439,12 +525,16 @@ def _question(request: ApprovalRequest) -> Text:
     return body
 
 
-def run_tui(workspace: Path | str | None = None) -> int:
+def run_tui(workspace: Path | str | None = None, resume: str | None = None) -> int:
     """Load config and run the TUI. Returns a process exit code.
 
     Config is loaded here rather than in ``cli`` so that the one thing that can
     stop bevel starting -- an unusable or missing endpoint -- is reported in the
     terminal that asked for bevel, before an alternate screen swallows it.
+
+    ``resume`` names a session to reopen: an id, or a prefix of one. A name that
+    matches nothing is an error here rather than a TUI that opens empty and
+    silently starts a new history.
     """
     try:
         config = load()
@@ -456,7 +546,23 @@ def run_tui(workspace: Path | str | None = None) -> int:
         default_profile=config.default_profile,
         cache_path=capability_cache_path(),
     )
-    app = BevelApp(provider=registry.provider(), workspace=workspace, policy=config.policy)
+    store = SessionStore(session_db_path())
+    resumed: ResumedSession | None = None
+    if resume is not None:
+        try:
+            info = store.resolve(resume)
+        except ValueError as exc:
+            store.close()
+            sys.stderr.write(f"bevel resume: {exc}\n")
+            return 2
+        resumed = rebuild_transcript(store, info.id)
+    app = BevelApp(
+        provider=registry.provider(),
+        workspace=workspace,
+        policy=config.policy,
+        store=store,
+        resume=resumed,
+    )
     return asyncio.run(_close_after(app, registry))
 
 
@@ -465,4 +571,6 @@ async def _close_after(app: BevelApp, registry: Registry) -> int:
         await app.run_async()
     finally:
         await registry.aclose()
+        if app.store is not None:
+            app.store.close()
     return 0

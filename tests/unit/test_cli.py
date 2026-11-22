@@ -16,7 +16,17 @@ import pytest
 
 from bevel import __version__
 from bevel.cli import _PENDING, build_parser, main
+from bevel.config import loader
 from bevel.core.checkpoint import snapshot
+from bevel.core.messages import Message
+from bevel.core.session.store import SessionStore
+
+
+def _pin_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Point the session store at a file in tmp_path, as the TUI tests do."""
+    path = tmp_path / "share" / "sessions.db"
+    monkeypatch.setattr(loader, "session_db_path", lambda: path)
+    return path
 
 
 class TestParser:
@@ -72,6 +82,200 @@ class TestPendingSubcommands:
     def test_no_pending_command_is_silently_accepted(self) -> None:
         """A planned command must never return success."""
         assert all(main([command]) != 0 for command in _PENDING)
+
+
+class TestSessions:
+    def test_no_sessions_says_so_and_names_the_file(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        db = _pin_db(tmp_path, monkeypatch)
+        assert main(["sessions"]) == 0
+        out = capsys.readouterr().out
+        assert "no sessions stored yet" in out
+        assert str(db) in out
+        assert not db.exists(), "listing sessions must not create a database"
+
+    def test_a_stored_session_is_listed_with_what_you_need_to_pick_it(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        db = _pin_db(tmp_path, monkeypatch)
+        store = SessionStore(db)
+        info = store.create_session(workspace=tmp_path, provider="vllm", model="qwen")
+        store.append_turn(info.id, Message.user("do the thing"), iteration=1)
+        store.record_usage(
+            info.id, iteration=1, prompt=1200, completion=340, reasoning=0, total=1540
+        )
+        store.close()
+
+        assert main(["sessions"]) == 0
+        out = capsys.readouterr().out
+        header, row, *_ = out.splitlines()
+        assert info.id in row
+        assert f"{info.prompt_tokens:,}" in row
+        assert f"{info.completion_tokens:,}" in row
+        assert str(tmp_path) in row
+        # The turn count is a bare column; check it is there rather than guessing
+        # which of the numeric columns it is.
+        assert " 1 " in f" {row} "
+        for column in (
+            "id",
+            "started",
+            "last activity",
+            "turns",
+            "prompt",
+            "completion",
+            "workspace",
+        ):
+            assert column in header
+        assert str(db) in out
+
+    def test_the_newest_session_is_listed_first(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        db = _pin_db(tmp_path, monkeypatch)
+        store = SessionStore(db)
+        first = store.create_session(workspace=tmp_path, provider="vllm", model="qwen")
+        second = store.create_session(workspace=tmp_path, provider="vllm", model="qwen")
+        store.close()
+
+        main(["sessions"])
+        out = capsys.readouterr().out
+        assert out.index(second.id) < out.index(first.id)
+
+
+class TestResume:
+    @pytest.fixture
+    def launched(self, monkeypatch: pytest.MonkeyPatch) -> list[str | None]:
+        opened: list[str | None] = []
+
+        def fake_run_tui(workspace: Path | str | None = None, resume: str | None = None) -> int:
+            del workspace
+            opened.append(resume)
+            return 0
+
+        monkeypatch.setattr("bevel.tui.app.run_tui", fake_run_tui)
+        return opened
+
+    def test_a_named_session_opens_the_tui_on_that_id(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        launched: list[str | None],
+    ) -> None:
+        db = _pin_db(tmp_path, monkeypatch)
+        store = SessionStore(db)
+        info = store.create_session(workspace=tmp_path, provider="vllm", model="qwen")
+        store.close()
+        assert main(["resume", info.id]) == 0
+        assert launched == [info.id]
+
+    def test_a_prefix_is_enough(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        launched: list[str | None],
+    ) -> None:
+        db = _pin_db(tmp_path, monkeypatch)
+        store = SessionStore(db)
+        info = store.create_session(workspace=tmp_path, provider="vllm", model="qwen")
+        store.close()
+        assert main(["resume", info.id[:4]]) == 0
+        assert launched == [info.id]
+
+    def test_an_unknown_id_fails_naming_what_was_asked_for(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        launched: list[str | None],
+    ) -> None:
+        db = _pin_db(tmp_path, monkeypatch)
+        store = SessionStore(db)
+        store.create_session(workspace=tmp_path, provider="v", model="m")
+        store.close()
+        assert main(["resume", "nosuchid"]) == 2
+        err = capsys.readouterr().err
+        assert "no session id starts with 'nosuchid'" in err
+        assert launched == []
+
+    def test_an_ambiguous_prefix_refuses_rather_than_guessing(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        launched: list[str | None],
+    ) -> None:
+        """Resuming the wrong session silently rewrites an unrelated history."""
+        db = _pin_db(tmp_path, monkeypatch)
+        store = SessionStore(db)
+        ids = [
+            store.create_session(workspace=tmp_path, provider="v", model="m").id for _ in range(64)
+        ]
+        store.close()
+        shared = next(
+            prefix
+            for prefix in (ids[0][:i] for i in range(1, len(ids[0]) + 1))
+            if sum(1 for session_id in ids if session_id.startswith(prefix)) > 1
+        )
+        assert main(["resume", shared]) == 2
+        err = capsys.readouterr().err
+        assert "ambiguous" in err
+        assert launched == []
+
+    def test_no_id_resumes_the_most_recent_session_for_this_directory(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        launched: list[str | None],
+    ) -> None:
+        db = _pin_db(tmp_path, monkeypatch)
+        store = SessionStore(db)
+        store.create_session(workspace=tmp_path, provider="v", model="m")
+        newest = store.create_session(workspace=tmp_path, provider="v", model="m")
+        store.close()
+        monkeypatch.chdir(tmp_path)
+        assert main(["resume"]) == 0
+        assert launched == [newest.id]
+
+    def test_no_id_and_no_stored_session_fails_with_a_reason(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        launched: list[str | None],
+    ) -> None:
+        _pin_db(tmp_path, monkeypatch)
+        monkeypatch.chdir(tmp_path)
+        assert main(["resume"]) == 2
+        err = capsys.readouterr().err
+        assert "no sessions have been stored yet" in err
+        assert launched == []
+
+    def test_a_session_from_another_directory_is_not_the_default(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        launched: list[str | None],
+    ) -> None:
+        db = _pin_db(tmp_path, monkeypatch)
+        store = SessionStore(db)
+        store.create_session(workspace=tmp_path / "elsewhere", provider="v", model="m")
+        store.close()
+        here = tmp_path / "here"
+        here.mkdir()
+        monkeypatch.chdir(here)
+        assert main(["resume"]) == 2
+        err = capsys.readouterr().err
+        assert "no stored session for" in err
+        assert "bevel sessions" in err
+        assert launched == []
 
 
 class TestUndo:

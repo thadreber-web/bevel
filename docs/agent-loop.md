@@ -4,17 +4,19 @@
 the piece every later milestone sits on. Policy (`core/policy/`) now decides every
 tool call, checkpoints (`core/checkpoint/`) snapshot the workspace before the
 first write, the orient step (`core/context/project_map.py`) puts the repo on the
-model's first request, and L1/L2 compaction (`core/context/compact.py`) fits an
-over-long transcript back into the window. The L3 handoff and session persistence
-still attach at the seams named below. The loop stays agnostic of all of them: it asks
-a `PolicyEvaluator` and records the verdict, without knowing what an engine is.
+model's first request, L1/L2 compaction (`core/context/compact.py`) fits an
+over-long transcript back into the window, and the session store
+(`core/session/`) writes every turn, tool call and usage row through to SQLite as
+the loop goes. The L3 handoff still attaches at the seam named below. The loop stays
+agnostic of all of them: it asks a `PolicyEvaluator` and records the verdict, without
+knowing what an engine is.
 
 ## Shape
 
 An `Agent` is built around a `Provider` and a `ToolRegistry` and is **single-use** —
 `run()` or `stream()` once, then discard. `run()` drains `stream()` and returns an
-`AgentResult`: final text, iteration count, every `ToolExecution`, token usage, and
-the `StopReason`.
+`AgentResult`: final text, iteration count, every `ToolExecution`, token usage, the
+`StopReason`, and the `session_id` it wrote to (or `None` with no store attached).
 
 Each iteration assembles the conversation, streams one completion, executes the tool
 calls it asked for, and appends one `role="tool"` message per call. The loop ends when
@@ -95,9 +97,10 @@ does not guess one here either.
 
 - **L1** cuts tool observations over `MIN_OBSERVATION_CHARS` to head + tail plus a
   pointer. Pure string work — no model call, no I/O, no new dependency, and the same
-  transcript always compacts to the same bytes. The dropped text is not stored
-  anywhere (that is session persistence, a later slice), so the replacement names the
-  originating call and its arguments and tells the model to re-run it.
+  transcript always compacts to the same bytes. The text it drops has a persisted
+  copy: the observation row in the session store still holds what the model was
+  originally shown, so the replacement points at the stored session (`saved in
+  session <id>`) as well as naming the originating call and its arguments.
 - **L2** replaces the middle of the transcript with one summary and leaves the last
   `KEEP_RECENT_TURNS` turns byte-identical. It costs a generation, which is why the
   loop tries L1 first and escalates only when L1 has nothing left to give. The
@@ -126,11 +129,40 @@ loop never fakes the behaviour it stands in for:
 | Seam | Arrives with |
 |---|---|
 | L3 compaction — restart the context from the project map, todos and recalled memory | m09, which supplies the todos and memory it needs |
-| Session persistence and resume — reopen a closed session, and read back the text L1 dropped | m08 (slice 3) |
 
 L1 and L2 are **not** in this list: they run, and their `COMPACTION` events carry the
-numbers that prove it. L3 is absent from the code entirely — no function, no enum
-variant, no placeholder that returns the transcript unchanged.
+numbers that prove it. Neither is session persistence: every turn, tool call and
+usage row a run produces is written through to `sessions.db` as it goes, and
+`core/session/resume.py` rebuilds a closed session from those rows. L3 is absent from
+the code entirely — no function, no enum variant, no placeholder that returns the
+transcript unchanged.
+
+## Sessions
+
+`core/session/store.py` is the loop's write-through target: one `sessions` row, one
+`turns` row per message, one `tool_calls` row per execution, one `usage` row per
+iteration the server reported numbers for. Stdlib `sqlite3` only, and every write
+commits, so a turn that completed is in the file before the loop moves on — closing
+the TUI, or losing it to a crash, costs at most the turn in flight. The connection
+opens on first write, so importing bevel or constructing an agent never creates a
+database file.
+
+The loop persists, it does not read. `core/session/resume.py` is the reader:
+`rebuild_transcript` turns rows back into a requestable transcript and reports
+`dropped`, the number of stored rows it had to discard from the tail. It has to — a
+crash between "the model asked for these calls" and "the results came back" leaves an
+assistant message naming calls with no results beside them, which a real server
+answers with a 400. Resume trims whole call-groups rather than sending a transcript
+the endpoint would reject, and says how much it trimmed rather than hiding it.
+
+The `system` message is deliberately **not** stored. A resumed run rebuilds it, so
+the project map is the current tree rather than the one from when the session was
+opened; the conversation itself is what comes back from the file.
+
+`bevel sessions` lists what is stored and `bevel resume [id]` reopens it (with no id,
+the most recent session for the current directory). The database lives at
+`~/.local/share/bevel/sessions.db` — one documented path on every platform, including
+Windows, and shared across workspaces so that `bevel sessions` can list them all.
 
 A `CHECKPOINT` event is emitted once per run, before the first batch that writes to the
 workspace. Its text is the truth of what happened: either the session's checkpoint
@@ -143,6 +175,12 @@ git is missing, or the commit failed.
 asserts **mechanics and consequences, never prose** — that a write changed the file on
 disk, that every call the model asked for got exactly one tool message back, that
 usage came from the server rather than being estimated.
+
+`tests/integration/test_live_resume.py` does the same for persistence: it runs a
+session, closes the store, reopens the file with a *second* `SessionStore` (a fresh
+connection, so nothing can be coming from memory), and asks the model to recall a
+random token only the first session contained. An answer that reproduces the token
+can only have come out of the rebuilt transcript.
 
 Two things learned the hard way, worth knowing before writing a test here:
 

@@ -519,19 +519,20 @@ async def test_the_run_stops_when_compaction_cannot_fit_the_window(tmp_path: Pat
 # ------------------------------------------------------------------- the seams
 
 
-def test_the_unbuilt_seams_are_exactly_persistence_and_l3() -> None:
-    assert len(UNBUILT_SEAMS) == 2
+def test_the_unbuilt_seam_is_exactly_l3() -> None:
+    """Persistence shipped in m08c; only the L3 handoff may still be disclaimed."""
+    assert len(UNBUILT_SEAMS) == 1
     joined = " ".join(UNBUILT_SEAMS).lower()
-    assert "persistence" in joined
-    assert "resume" in joined
     assert "l3" in joined
+    assert "persistence" not in joined
+    assert "resume" not in joined
     # L1 and L2 may be *named* (they are L3's inputs) but neither may be reported
     # as missing. The subject of each seam is the text before "is not built".
     for seam in UNBUILT_SEAMS:
         subject = seam.lower().split("is not built")[0]
         assert "l1" not in subject
         assert "l2" not in subject
-        assert "compaction" in subject or "persistence" in subject
+        assert "compaction" in subject
 
 
 async def test_a_compaction_that_ran_never_reports_itself_as_unbuilt(tmp_path: Path) -> None:

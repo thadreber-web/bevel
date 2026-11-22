@@ -6,7 +6,7 @@ A terminal coding agent for model servers you already run.
 
 bevel talks to **OpenAI-compatible endpoints only** — [vLLM](https://docs.vllm.ai/) and [llama.cpp](https://github.com/ggml-org/llama.cpp)'s `llama-server`. No API keys, no per-token billing, no code leaving your network.
 
-> **Status: under construction.** The scaffold, capability probing, and `bevel doctor` work today, as do the provider layer, the tool layer, the agent loop, the policy engine, checkpoints, and the TUI — run `bevel` with no subcommand to open it. The loop is covered by tests run against a real vLLM endpoint, and the TUI by Textual's Pilot. Context management, memory, and sandboxing arrive in m08–m12 — see [Build order](#build-order). `bevel` refuses to print a friendly lie about anything that isn't built yet: unimplemented subcommands exit non-zero and name the milestone that delivers them, and the TUI prints the seams the loop does not implement instead of letting you assume they exist.
+> **Status: under construction.** The scaffold, capability probing, and `bevel doctor` work today, as do the provider layer, the tool layer, the agent loop, the policy engine, checkpoints, the TUI, and session persistence — run `bevel` with no subcommand to open it, and `bevel resume` to reopen a session you closed. The loop is covered by tests run against a real vLLM endpoint, and the TUI by Textual's Pilot. Memory and sandboxing arrive in m09–m12 — see [Build order](#build-order). `bevel` refuses to print a friendly lie about anything that isn't built yet: unimplemented subcommands exit non-zero and name the milestone that delivers them, and the TUI prints the seams the loop does not implement instead of letting you assume they exist.
 
 ## Why this exists
 
@@ -133,14 +133,17 @@ uv run bevel
 
 That opens the TUI over the current directory. `f2` cycles plan → default → auto mode, `f1` opens the command palette, `Ctrl+C` stops a run (and quits when nothing is running), and focusing a tool card that carries a diff then pressing `enter` opens it full-screen. `bevel undo` from a second terminal rewinds the working tree to the last checkpoint.
 
+Close it and the conversation is not gone: `bevel sessions` lists what is stored, and `bevel resume` reopens the most recent session for this directory (or `bevel resume <id>` for a specific one) with the transcript read back from disk and the model continuing with that history.
+
 ## What it does
 
 - **Agent loop** — orient → plan → act → observe, under explicit iteration, tool-call, and token budgets, with cancellation wired end-to-end: `cancel()` abandons the in-flight request *and* the tool tasks, which for the shell tool means the whole process tree. `core/agent.py` is covered by tests run against a real endpoint, and [docs/agent-loop.md](docs/agent-loop.md) explains the decisions.
 - **Tools** — read, grep, glob, write, edit (real diff application), shell (timeouts, process-tree kill). Each declares its JSON Schema and risk tier; `core/tools/registry.py` is the single source of truth for the offered list, and [docs/tool-layer.md](docs/tool-layer.md) explains the decisions.
 - **Tiered approvals** — `READ` free, `WRITE_WORKSPACE` ask, `WRITE_OUTSIDE` always ask, `EXEC_SAFE` free once allowlisted, `EXEC_UNSAFE` ask, `EXEC_DESTRUCTIVE` always ask with typed confirmation, `NETWORK_EGRESS` ask. Rules are learnable and every decision is logged with the rule that produced it. Checkpoints run even under `--yolo`.
 - **TUI** — `bevel` with no subcommand. A streaming transcript (markdown answers, collapsed italic reasoning), one card per tool call coloured by its outcome, a full-screen diff viewer, plan/default/auto modes, an approval dialog, and `Ctrl+C` that genuinely stops the run. Tested with Textual's Pilot against `MockProvider`.
+- **Sessions** — every turn, tool call (name, arguments, outcome, observation) and usage row is written through to SQLite as the loop goes, one commit per write, so a turn that completed survives the process. `bevel sessions` lists recent sessions with their workspace, times, turn count and token totals; `bevel resume [id]` reopens one — the transcript you see is read back from the file, and the model continues with that history. Resume trims an unusable tail (a crash between asking for calls and getting results) and says how much it dropped. The reopened transcript is verified against a real endpoint by a test that asks the model to recall a fact from the closed session.
 - **Checkpoints** — the working tree, uncommitted work-in-progress included, is committed to a `bevel/checkpoint/<session>` ref before the agent's first write, and `bevel undo` rewinds it from either the CLI or the TUI.
-- **Context management** — a project map on the model's first request, and two levels of compaction: L1 truncates stale tool observations to head+tail plus a pointer naming the call to re-run, L2 summarises the middle of the transcript and keeps the last N turns byte-identical. Both are triggered by the server's own `prompt_tokens`, never a chars/4 guess. The L3 handoff is not built — it restarts the context from todos and recalled memory that arrive with m09, and the loop says so.
+- **Context management** — a project map on the model's first request, and two levels of compaction: L1 truncates stale tool observations to head+tail plus a pointer naming the call to re-run and the session holding the full text, L2 summarises the middle of the transcript and keeps the last N turns byte-identical. Both are triggered by the server's own `prompt_tokens`, never a chars/4 guess. The L3 handoff is not built — it restarts the context from todos and recalled memory that arrive with m09, and the loop says so.
 - **Memory** — SQLite FTS5 from the standard library, plus optional vector recall over your server's `/embeddings`.
 - **MCP** — hand-rolled JSON-RPC over stdio and streamable-HTTP, implementing the subset that matters.
 - **Evals** — TOML task specs against a fixture repo with a seeded bug, asserting that tests pass, that the diff contains what it should, and that it stays under token and cost ceilings.
@@ -192,7 +195,7 @@ Probing, enforcement, and verification are three separate roles. `_capability.py
 | ✅ | m05 policy + approvals |
 | ✅ | m06 checkpoints |
 | ✅ | m07 TUI |
-| 🔶 | m08 context management + sessions — project map ✅, L1/L2 compaction ✅; session persistence + resume and the L3 handoff remain (L3 lands after m09) |
+| 🔶 | m08 context management + sessions — project map ✅, L1/L2 compaction ✅, session persistence + resume ✅; the L3 handoff remains (it lands after m09) |
 | ⬜ | m09 memory |
 | ⬜ | m10 MCP client |
 | ⬜ | m11 git + PRs |

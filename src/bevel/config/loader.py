@@ -39,6 +39,7 @@ CONFIG_FILENAME = "config.toml"
 PROJECT_FILENAME = "bevel.toml"
 CAPABILITY_CACHE_FILENAME = "capabilities.json"
 POLICY_DB_FILENAME = "policy.db"
+SESSION_DB_FILENAME = "sessions.db"
 
 _POLICY_KEYS = frozenset({"mode", "db_path", "allow", "deny"})
 _POLICY_MODES = tuple(mode.value for mode in PolicyMode)
@@ -79,6 +80,21 @@ def capability_cache_path() -> Path:
 def policy_db_path() -> Path:
     """``~/.cache/bevel/policy.db`` -- learned allowlist and decision log."""
     return cache_home() / POLICY_DB_FILENAME
+
+
+def data_home() -> Path:
+    """``~/.local/share/bevel`` -- holds the session database.
+
+    Same reasoning as :func:`config_home`: one documented path on every
+    platform, correct on Windows too, where it is simply a directory under the
+    user profile rather than the conventional ``%LOCALAPPDATA%`` one.
+    """
+    return Path.home() / ".local" / "share" / CONFIG_DIRNAME
+
+
+def session_db_path() -> Path:
+    """``~/.local/share/bevel/sessions.db`` -- transcripts and token accounting."""
+    return data_home() / SESSION_DB_FILENAME
 
 
 def candidate_files(
@@ -365,6 +381,8 @@ __all__ = [
     "candidate_files",
     "capability_cache_path",
     "config_home",
+    "data_home",
     "load",
     "policy_db_path",
+    "session_db_path",
 ]

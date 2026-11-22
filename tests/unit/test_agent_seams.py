@@ -15,8 +15,15 @@ from bevel.core.agent import DEFAULT_SYSTEM_PROMPT, UNBUILT_SEAMS
 
 
 def test_unbuilt_seams_is_context_only() -> None:
-    assert len(UNBUILT_SEAMS) == 2, UNBUILT_SEAMS
+    assert len(UNBUILT_SEAMS) == 1, UNBUILT_SEAMS
     assert all("m08" in seam for seam in UNBUILT_SEAMS), UNBUILT_SEAMS
+
+
+def test_session_persistence_is_no_longer_reported_as_unbuilt() -> None:
+    """m08c shipped resume and write-through; the loop must stop disclaiming them."""
+    joined = " ".join(UNBUILT_SEAMS).lower()
+    assert "persistence" not in joined
+    assert "resume" not in joined
 
 
 @pytest.mark.parametrize("stale", ["m05", "policy", "approval", "m06", "checkpoint"])

@@ -81,12 +81,17 @@ class L2Result:
         return self.chars_removed > 0
 
 
-def compact_l1(messages: list[Message]) -> L1Result:
-    """Cut stale tool observations to head + tail plus a pointer to re-run the call.
+def compact_l1(messages: list[Message], *, session_id: str | None = None) -> L1Result:
+    """Cut stale tool observations to head + tail plus a pointer to the saved text.
 
     Only observations over ``MIN_OBSERVATION_CHARS`` are touched, and only once:
     text already carrying the truncation marker is left alone so a second pass
     reports "changed nothing" instead of shaving the same message forever.
+
+    ``session_id`` is the session whose store holds the full text of every
+    observation. When it is given, the replacement points the model at that
+    saved copy; when it is not (no store attached), the replacement can only
+    name the call to re-run, and says the text was not saved.
     """
     origins = _tool_call_origins(messages)
     out: list[Message] = []
@@ -99,7 +104,9 @@ def compact_l1(messages: list[Message]) -> L1Result:
         if _TRUNCATED in message.content:
             out.append(message)
             continue
-        replacement = _truncate_observation(message, origins.get(message.tool_call_id or ""))
+        replacement = _truncate_observation(
+            message, origins.get(message.tool_call_id or ""), session_id
+        )
         removed += len(message.content) - len(replacement)
         cut += 1
         out.append(
@@ -121,13 +128,19 @@ def _tool_call_origins(messages: list[Message]) -> dict[str, str]:
     return origins
 
 
-def _truncate_observation(message: Message, origin: str | None) -> str:
+def _truncate_observation(message: Message, origin: str | None, session_id: str | None) -> str:
     content = message.content
     head = content[:HEAD_CHARS]
     tail = content[-TAIL_CHARS:]
     omitted = len(content) - len(head) - len(tail)
     if origin is None:
         pointer = f"{_TRUNCATED} {omitted} characters omitted; the originating call is unknown."
+    elif session_id is not None:
+        pointer = (
+            f"{_TRUNCATED} {omitted} characters omitted; the full text is saved in session "
+            f"{session_id} under tool call {message.tool_call_id}, so it can be read back "
+            f"with `bevel resume {session_id}`. Re-run {origin} to see it again now."
+        )
     else:
         pointer = (
             f"{_TRUNCATED} {omitted} characters omitted and the full text was not saved. "

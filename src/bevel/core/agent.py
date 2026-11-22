@@ -19,11 +19,14 @@ the model knows the layout without spending a tool call discovering it. Step 8 n
 compacts: when the server's own ``prompt_tokens`` come back over
 ``Capabilities.max_model_len``, L1 truncates stale tool observations and, if that is
 not enough, L2 summarises the middle of the transcript (see
-:mod:`bevel.core.context.compact`). What is still missing from steps 1 and 8 — saving
-a session so it can be resumed, and the L3 handoff that recovers when L1 and L2 cannot
-fit the transcript — is named in :data:`UNBUILT_SEAMS`, reported on every
-:class:`AgentResult`, and logged once per run. Nothing here pretends to do what it
-cannot. Policy (step 4) is enforced by :class:`~bevel.core.policy.PolicyEngine`.
+:mod:`bevel.core.context.compact`). When a :class:`~bevel.core.session.store.SessionStore`
+is attached, every message, tool call and usage row is written through as it completes,
+and a run can continue a session that was closed earlier (see
+:mod:`bevel.core.session.resume`). What is still missing from step 8 — the L3 handoff
+that recovers when L1 and L2 cannot fit the transcript — is named in
+:data:`UNBUILT_SEAMS`, reported on every :class:`AgentResult`, and logged once per run.
+Nothing here pretends to do what it cannot. Policy (step 4) is enforced by
+:class:`~bevel.core.policy.PolicyEngine`.
 
 Cancellation
 ------------
@@ -74,6 +77,8 @@ from bevel.core.policy import (
     PolicyVerdict,
     allow_all_policy,
 )
+from bevel.core.session.resume import ResumedSession
+from bevel.core.session.store import SessionStore
 from bevel.core.tools.base import RiskTier, Tool, ToolContext, ToolResult, call_tool
 from bevel.core.tools.registry import tools as builtin_tools
 from bevel.core.tools.types import ToolSpec
@@ -116,11 +121,6 @@ __all__ = [
 #: How many parallel-safe tool calls may be in flight at once.
 DEFAULT_CONCURRENCY: Final[int] = 4
 
-_SEAM_PERSISTENCE: Final[str] = (
-    "m08 (session persistence and resume) is not built: a closed session cannot be "
-    "reopened, and the text compaction drops from a long observation is not saved "
-    "anywhere — the replacement tells the model which call to re-run instead"
-)
 _SEAM_L3: Final[str] = (
     "m08 (L3 compaction) is not built: when L1 and L2 cannot fit the transcript in the "
     "window the run stops with context_overflow, rather than restarting the context from "
@@ -128,7 +128,7 @@ _SEAM_L3: Final[str] = (
 )
 
 #: What this loop does *not* do, in the words the loop itself reports.
-UNBUILT_SEAMS: Final[tuple[str, ...]] = (_SEAM_PERSISTENCE, _SEAM_L3)
+UNBUILT_SEAMS: Final[tuple[str, ...]] = (_SEAM_L3,)
 
 DEFAULT_SYSTEM_PROMPT: Final[str] = (
     "You are bevel, a coding agent working in a local workspace.\n"
@@ -333,6 +333,7 @@ class AgentResult:
     seams: tuple[str, ...] = UNBUILT_SEAMS
     usage_reported: bool = True
     error: str | None = None
+    session_id: str | None = None
 
     @property
     def ok(self) -> bool:
@@ -481,6 +482,8 @@ class Agent:
         approver: Approver | None = None,
         repairer: ToolCallRepairer | None = None,
         summariser: ModelProvider | None = None,
+        store: SessionStore | None = None,
+        resume: ResumedSession | None = None,
     ) -> None:
         if budgets.max_iterations < 1:
             raise ValueError("max_iterations must be at least 1")
@@ -509,6 +512,10 @@ class Agent:
         self._cancel_event = asyncio.Event()
         self._cancel_reason = ""
         self._running = False
+        self._store = store
+        self._session_id = resume.session.id if resume is not None else None
+        self._resumed = resume
+        self._turn_row: int | None = None
 
     # ------------------------------------------------------------------- public
 
@@ -526,6 +533,7 @@ class Agent:
             events=tuple(state.events),
             usage_reported=state.usage_reported,
             error=state.error,
+            session_id=self._session_id,
         )
 
     def stream(self, task: str) -> AsyncIterator[AgentEvent]:
@@ -560,6 +568,11 @@ class Agent:
         """Tool calls currently in flight as tasks."""
         return len(self._tool_tasks)
 
+    @property
+    def session_id(self) -> str | None:
+        """The session this run is writing to, or ``None`` with no store attached."""
+        return self._session_id
+
     # ------------------------------------------------------------------ private
 
     async def _iterate(self, task: str, state: _RunState) -> AsyncIterator[AgentEvent]:
@@ -568,12 +581,7 @@ class Agent:
         self._running = True
         self._cancel_reason = ""
         self._cancel_event.clear()
-        # The walk is bounded but real disk I/O, and it happens while the TUI is
-        # live, so it goes off the event loop.
-        project_map = await asyncio.to_thread(build_project_map, self.ctx.workspace)
-        state.messages.extend(
-            (Message.system(f"{self.system}\n\n{project_map}"), Message.user(task))
-        )
+        await self._seed(task, state)
         totals = _Totals()
         logger.warning("agent loop starting with unbuilt seams: %s", "; ".join(UNBUILT_SEAMS))
         yield AgentEvent(AgentEventType.STARTED, iteration=0, text=task)
@@ -594,6 +602,8 @@ class Agent:
                 turn = await assemble(_replay(collected))
                 totals.add(turn.usage or Usage())
                 state.messages.append(turn.message)
+                self._persist(turn.message, state.iterations)
+                self._persist_usage(turn.usage, state.iterations)
                 yield AgentEvent(
                     AgentEventType.TURN_COMPLETE,
                     iteration=state.iterations,
@@ -636,6 +646,24 @@ class Agent:
             text=state.stop.value,
             error=state.error,
         )
+
+    async def _seed(self, task: str, state: _RunState) -> None:
+        """Build the message list the first request is made of.
+
+        The system prompt carries a freshly built project map rather than a
+        stored one, so a resumed session never inherits a stale picture of the
+        tree. What *is* taken from the store is the conversation itself.
+        """
+        # The walk is bounded but real disk I/O, and it happens while the TUI is
+        # live, so it goes off the event loop.
+        project_map = await asyncio.to_thread(build_project_map, self.ctx.workspace)
+        state.messages.append(Message.system(f"{self.system}\n\n{project_map}"))
+        if self._resumed is not None:
+            state.messages.extend(self._resumed.messages)
+        task_message = Message.user(task)
+        state.messages.append(task_message)
+        self._open_session()
+        self._persist(task_message)
 
     def _budget_stop(self, state: _RunState, totals: _Totals) -> tuple[StopReason, str] | None:
         """Why the next iteration must not start, or ``None`` to continue.
@@ -705,12 +733,15 @@ class Agent:
                 continue
             execution = item.as_execution()
             executions.append(execution)
+            self._persist_execution(execution)
             yield AgentEvent(
                 AgentEventType.TOOL_COMPLETE,
                 iteration=state.iterations,
                 executions=(execution,),
             )
-            state.messages.append(Message.tool_result(execution.call.id, execution.observation))
+            observation = Message.tool_result(execution.call.id, execution.observation)
+            state.messages.append(observation)
+            self._persist(observation, state.iterations)
 
         schedulable = [item for item in pending if item.outcome is None]
         if not self._checkpointed and any(
@@ -730,18 +761,63 @@ class Agent:
         async for batch in self._execute(schedulable):
             executions.extend(batch)
             for execution in batch:
+                self._persist_execution(execution)
                 yield AgentEvent(
                     AgentEventType.TOOL_COMPLETE,
                     iteration=state.iterations,
                     executions=(execution,),
                 )
-                state.messages.append(Message.tool_result(execution.call.id, execution.observation))
+                observation = Message.tool_result(execution.call.id, execution.observation)
+                state.messages.append(observation)
+                self._persist(observation, state.iterations)
         state.tool_calls += len(pending)
 
         event, stop = await self._compact(state, totals)
         if stop is not None:
             state.stop = stop
         yield event
+
+    # ------------------------------------------------------------- persistence
+
+    def _open_session(self) -> None:
+        """Create the session row this run writes through, unless resuming one."""
+        if self._store is None or self._session_id is not None:
+            return
+        self._session_id = self._store.create_session(
+            workspace=self.ctx.workspace, provider=self.provider.name, model=self.provider.model
+        ).id
+
+    def _persist(self, message: Message, iteration: int = 1) -> None:
+        """Append one message. Commits immediately: a completed message is recoverable.
+
+        An assistant message that asked for tools owns the execution rows that
+        follow it, so its row id is remembered for them to attach to.
+        """
+        if self._store is None or self._session_id is None:
+            return
+        row = self._store.append_turn(self._session_id, message, iteration=iteration)
+        if message.tool_calls:
+            self._turn_row = row
+
+    def _persist_execution(self, execution: ToolExecution) -> None:
+        """Record the call and its outcome beside the assistant turn that asked for it."""
+        if self._store is None or self._session_id is None or self._turn_row is None:
+            return
+        self._store.append_tool_call(self._session_id, self._turn_row, execution)
+
+    def _persist_usage(self, usage: Usage | None, iteration: int) -> None:
+        if self._store is None or self._session_id is None or usage is None:
+            return
+        if not (usage.prompt_tokens or usage.completion_tokens or usage.total_tokens):
+            return  # the server reported nothing; there is no row to write
+        self._store.record_usage(
+            self._session_id,
+            iteration=iteration,
+            prompt=usage.prompt_tokens,
+            completion=usage.completion_tokens,
+            reasoning=usage.reasoning_tokens,
+            total=usage.total_tokens,
+        )
 
     async def _compact(
         self, state: _RunState, totals: _Totals
@@ -797,7 +873,7 @@ class Agent:
                 None,
             )
 
-        l1 = compact_l1(state.messages)
+        l1 = compact_l1(state.messages, session_id=self._session_id)
         if l1.changed:
             state.messages[:] = l1.messages
             text = (

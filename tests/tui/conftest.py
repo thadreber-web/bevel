@@ -18,24 +18,40 @@ import pytest
 
 from bevel.config import loader
 from bevel.config.schema import PolicyConfig, PolicyMode
+from bevel.core.session.resume import ResumedSession
+from bevel.core.session.store import SessionStore
 from bevel.providers.mock import MockProvider, ScriptedTurn
 from bevel.tui.app import BevelApp, RunMode
 
 
 @pytest.fixture(autouse=True)
 def isolated_homes(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """Keep config, cache and policy state out of the real user directories."""
+    """Keep config, cache, policy and session state out of the real user directories."""
     monkeypatch.setattr(loader, "config_home", lambda: tmp_path / "config")
     monkeypatch.setattr(loader, "cache_home", lambda: tmp_path / "cache")
+    monkeypatch.setattr(loader, "data_home", lambda: tmp_path / "share")
 
 
 @pytest.fixture
 def make_app(tmp_path: Path, isolated_homes: None) -> Callable[..., BevelApp]:
     """Build an app over a throwaway workspace driven by a scripted provider."""
 
-    def factory(*turns: ScriptedTurn, mode: RunMode = RunMode.AUTO, delay: float = 0.0) -> BevelApp:
+    def factory(
+        *turns: ScriptedTurn,
+        mode: RunMode = RunMode.AUTO,
+        delay: float = 0.0,
+        store: bool = True,
+        resume: ResumedSession | None = None,
+    ) -> BevelApp:
         policy = PolicyConfig(mode=PolicyMode.AUTO, db_path=tmp_path / "policy.db")
         provider = MockProvider(turns=list(turns), delay=delay)
-        return BevelApp(provider=provider, workspace=tmp_path, policy=policy, mode=mode)
+        return BevelApp(
+            provider=provider,
+            workspace=tmp_path,
+            policy=policy,
+            mode=mode,
+            store=SessionStore(loader.session_db_path()) if store else None,
+            resume=resume,
+        )
 
     return factory

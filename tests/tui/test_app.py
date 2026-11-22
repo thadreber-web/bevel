@@ -24,10 +24,14 @@ from textual.containers import VerticalScroll
 from textual.pilot import Pilot
 from textual.widgets import Static
 
+from bevel.config import loader
 from bevel.config.schema import PolicyConfig, PolicyMode
-from bevel.core.agent import UNBUILT_SEAMS, Agent
+from bevel.core.agent import UNBUILT_SEAMS, Agent, ToolOutcome
 from bevel.core.checkpoint import snapshot
-from bevel.core.messages import Message
+from bevel.core.messages import Message, ToolCall
+from bevel.core.session.resume import rebuild_transcript
+from bevel.core.session.store import SessionStore
+from bevel.core.tools.base import ToolResult
 from bevel.core.tools.types import ToolSpec
 from bevel.providers.base import Capabilities, ContentDelta, GenOptions, ProviderError, StreamEvent
 from bevel.providers.mock import MockProvider, ScriptedTurn, tool_call
@@ -87,14 +91,21 @@ def styles(app: BevelApp, needle: str) -> list[str]:
 
 
 async def test_seams_are_announced_before_any_task(make_app: Callable[..., BevelApp]) -> None:
-    """What is not built is said out loud, on mount, without being asked."""
+    """What is not built is said out loud, on mount, without being asked.
+
+    m08c deliberately flipped this assertion: session persistence used to be
+    announced here as unbuilt. It is built now, so the only seam left in m08 is
+    the L3 handoff, and a run must say so without also claiming it cannot store.
+    """
     app = make_app(ScriptedTurn(content="hi"))
     async with app.run_test() as pilot:
         await settle(pilot, lambda: len(lines(app)) >= len(UNBUILT_SEAMS))
         shown = lines(app)
+    assert len(UNBUILT_SEAMS) == 1
     for seam in UNBUILT_SEAMS:
         assert any(seam in line for line in shown), seam
     assert all("not built" in line for line in shown if "m08" in line)
+    assert not any("not built" in line and "persist" in line for line in shown)
 
 
 async def test_title_names_the_model_and_the_mode(make_app: Callable[..., BevelApp]) -> None:
@@ -708,3 +719,108 @@ async def test_a_context_overflow_stops_the_run_with_a_readable_line(tmp_path: P
 
     assert any("stopped: context would not fit" in line for line in shown), shown
     assert any("L3" in line for line in shown), shown
+
+
+# ---------------------------------------------------------------------- resume
+
+
+async def test_a_resumed_app_shows_the_transcript_from_the_store(
+    make_app: Callable[..., BevelApp],
+) -> None:
+    """The reopened transcript is read back from SQLite, not held in memory.
+
+    The proof is that the second app is a *different process-local object* with
+    no memory of the first run: everything it displays has to come off the disk.
+    """
+    first = make_app(
+        ScriptedTurn(
+            content="the passphrase is zephyr-quartz",
+            tool_calls=[tool_call("c1", "read", {"path": "notes.txt"})],
+        ),
+        ScriptedTurn(content="done"),
+    )
+    (first.workspace / "notes.txt").write_text("secret notes", encoding="utf-8")
+    async with first.run_test() as pilot:
+        await submit(pilot, "read my notes and tell me the passphrase")
+        assert await settle(pilot, lambda: any("done" in line for line in lines(first)))
+    assert first.resume is not None, "the run did not leave a session behind"
+    assert first.store is not None
+    store = first.store
+    assert store is not None
+
+    reopened = rebuild_transcript(SessionStore(store.db_path), first.resume.session.id)
+    assert reopened is not None
+    app = make_app(ScriptedTurn(content="zephyr-quartz"), resume=reopened)
+    async with app.run_test() as pilot:
+        assert await settle(pilot, lambda: any("resumed" in line for line in lines(app)))
+        shown = lines(app)
+        cards = list(app.query(ToolCard))
+
+    assert any("read my notes and tell me the passphrase" in line for line in shown), shown
+    assert any("the passphrase is zephyr-quartz" in line for line in shown), shown
+    assert len(cards) == 1
+    assert cards[0].execution.name == "read"
+    assert cards[0].execution.outcome is ToolOutcome.OK
+    assert "secret notes" in (cards[0].execution.result or ToolResult(ok=False)).content
+
+
+async def test_a_resumed_app_sends_the_stored_history_to_the_model(
+    make_app: Callable[..., BevelApp],
+) -> None:
+    """What the user sees is not the point; what the endpoint receives is."""
+    first = make_app(ScriptedTurn(content="the capital is Llanfairpwll"))
+    async with first.run_test() as pilot:
+        await submit(pilot, "what is the capital?")
+        assert await settle(pilot, lambda: any("Llanfairpwll" in line for line in lines(first)))
+    assert first.resume is not None
+    assert first.store is not None
+
+    reopened = rebuild_transcript(SessionStore(first.store.db_path), first.resume.session.id)
+    assert reopened is not None
+    second = make_app(ScriptedTurn(content="Llanfairpwll, again"), resume=reopened)
+    async with second.run_test() as pilot:
+        await submit(pilot, "say it once more")
+        assert await settle(pilot, lambda: any("again" in line for line in lines(second)))
+
+    sent = second.provider.requests[0]["messages"]
+    assert [message.role for message in sent] == ["system", "user", "assistant", "user"]
+    assert sent[1].content == "what is the capital?"
+    assert sent[3].content == "say it once more"
+
+
+async def test_a_resumed_app_announces_what_it_had_to_drop(
+    make_app: Callable[..., BevelApp], tmp_path: Path
+) -> None:
+    """A session whose last run died mid-batch says so instead of hiding it."""
+    store = SessionStore(loader.session_db_path())
+    info = store.create_session(workspace=tmp_path, provider="mock", model="mock-model")
+    store.append_turn(info.id, Message.user("read both"), iteration=1)
+    store.append_turn(
+        info.id,
+        Message(
+            "assistant",
+            tool_calls=(ToolCall("c1", "read", "{}"), ToolCall("c2", "read", "{}")),
+        ),
+        iteration=1,
+    )
+    store.append_turn(info.id, Message.tool_result("c1", "the first half"), iteration=1)
+
+    reopened = rebuild_transcript(store, info.id)
+    assert reopened is not None
+    app = make_app(ScriptedTurn(content="ok"), resume=reopened)
+    async with app.run_test() as pilot:
+        assert await settle(pilot, lambda: any("dropped" in line for line in lines(app)))
+        shown = lines(app)
+
+    assert any("dropped" in line and "2 trailing message" in line for line in shown), shown
+    assert any(line.startswith("you") and "read both" in line for line in shown), shown
+    assert not any("the first half" in line for line in shown), shown
+
+
+async def test_a_run_without_a_store_still_works(make_app: Callable[..., BevelApp]) -> None:
+    """Persistence is attached, not required; the TUI must not need a database."""
+    app = make_app(ScriptedTurn(content="no database needed"), store=False)
+    async with app.run_test() as pilot:
+        await submit(pilot, "are you storing anything")
+        assert await settle(pilot, lambda: any("no database needed" in line for line in lines(app)))
+    assert not loader.session_db_path().exists()
