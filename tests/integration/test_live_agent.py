@@ -370,7 +370,7 @@ async def test_a_write_actually_changes_the_workspace(
     checkpoints = _events(result, AgentEventType.CHECKPOINT)
     assert checkpoints, "a mutating run must emit a CHECKPOINT event"
     assert checkpoints[0].text.startswith("checkpointed "), checkpoints[0].text
-    assert list_checkpoints(workspace), "the checkpoint commit never landed on its ref"
+    assert await list_checkpoints(workspace), "the checkpoint commit never landed on its ref"
     _assert_transcript_is_wellformed(result)
 
 
@@ -414,15 +414,16 @@ async def test_unbuilt_seams_are_reported_on_every_result(
 ) -> None:
     """What the loop does not do must ride out with every result.
 
-    This is the anti-fake guarantee: a caller that never reads the docs still learns
-    that a closed session cannot be reopened and that the L3 handoff does not exist.
-    Policy is enforced and checkpoints are taken, so neither is among the seams.
+    This is the anti-fake guarantee: a caller that never reads the docs still
+    learns that the L3 handoff does not exist. Policy is enforced, checkpoints
+    are taken and a closed session can be reopened, so none of those is among
+    the seams.
     """
     agent = Agent(endpoint, workspace, budgets=Budgets(max_iterations=1), options=GEN)
     result = await agent.run("Say ok.")
 
     assert result.seams == UNBUILT_SEAMS
-    assert len(result.seams) == 2
+    assert len(result.seams) == 1
     assert all("m08" in seam for seam in result.seams)
 
 

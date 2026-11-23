@@ -210,7 +210,7 @@ async def test_measured_capabilities_match_the_probed_endpoint(
     caps = endpoint.capabilities
     assert caps.supports_tools is True
     assert caps.supports_parallel_tool_calls is True
-    assert caps.max_model_len == 131072
+    assert caps.max_model_len == 252000
     assert caps.reasoning is True
     # Absent on this server: the gateway does not proxy them. If these flip to
     # True, bevel should start using them -- and this test is the nudge.
