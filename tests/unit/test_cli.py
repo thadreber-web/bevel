@@ -203,8 +203,14 @@ class TestMemories:
         out = capsys.readouterr().out
         row = next(line for line in out.splitlines() if "we use uv" in line)
         assert f"{scope}we use" not in row, "the scope column ran into the content column"
-        assert "repo:github.com/thadreber-web/be..." in row, "the scope was dropped, not elided"
+        assert "repo:github.com/thadreber-web/..." in row, "the scope was dropped, not elided"
         assert "we use uv, not pip" in row
+        # The columns are fixed width, so the content always starts at the same
+        # offset whether the scope was padded or elided. Asserting the offset is
+        # what catches an elision one character too wide: ``f"{scope[:32]}..."``
+        # is 35 characters in a 34-wide column and merely *touches* the content.
+        header = next(line for line in out.splitlines() if "content" in line)
+        assert row.index("we use uv, not pip") == header.index("content")
 
     def test_a_superseded_memory_is_hidden_from_list_but_still_readable(
         self, db: Path, capsys: pytest.CaptureFixture[str]
