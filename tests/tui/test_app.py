@@ -36,7 +36,7 @@ from bevel.core.tools.base import ToolResult
 from bevel.core.tools.types import ToolSpec
 from bevel.providers.base import Capabilities, ContentDelta, GenOptions, ProviderError, StreamEvent
 from bevel.providers.mock import MockProvider, ScriptedTurn, tool_call
-from bevel.tui.app import ApprovalScreen, BevelApp, RunMode
+from bevel.tui.app import ApprovalScreen, BevelApp, RunMode, run_tui
 from bevel.tui.widgets.diff_viewer import DiffScreen, DiffView
 from bevel.tui.widgets.tool_cards import ToolCard
 from bevel.tui.widgets.transcript import REASONING_STYLE, ContentBlock, ReasoningBlock
@@ -871,6 +871,63 @@ async def test_the_tui_injects_recalled_memory_into_the_first_request(
     assert MATCHED_MEMORY in text, "the TUI never passed the memory store to the loop"
     assert UNMATCHED_MEMORY not in text, "an irrelevant memory reached the model"
     memory.close()
+
+
+def test_run_tui_only_builds_a_store_when_config_turns_memory_on(
+    tmp_path: Path,
+    isolated_homes: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``[memory] enabled`` has to be what decides, not nothing at all.
+
+    Handing a store to ``BevelApp`` by hand, as the test above does, proves the
+    app passes it down. It says nothing about whether ``run_tui`` ever built one
+    from config -- which is precisely the line that was missing, and the reason
+    the feature was inert for a user who turned it on. So this drives ``run_tui``
+    itself with the app stubbed out, and reads back what the entry point decided.
+
+    Sync, not async: ``run_tui`` owns the event loop, and ``asyncio.run`` cannot
+    be called from inside one.
+    """
+    for name in ("BEVEL_BASE_URL", "BEVEL_MODEL", "BEVEL_PROFILE", "BEVEL_CONFIG"):
+        monkeypatch.delenv(name, raising=False)
+
+    captured: dict[str, object] = {}
+
+    class RecordingApp:
+        """Stands in for the app so no alternate screen is ever opened."""
+
+        def __init__(self, **kwargs: object) -> None:
+            captured.update(kwargs)
+            self.__dict__.update(kwargs)
+
+        async def run_async(self) -> int:
+            return 0
+
+    monkeypatch.setattr("bevel.tui.app.BevelApp", RecordingApp)
+
+    config_dir = tmp_path / "config"
+    config_dir.mkdir(parents=True, exist_ok=True)
+
+    def run(enabled: bool) -> object:
+        (config_dir / "config.toml").write_text(
+            "[profile.home]\n"
+            'base_url = "https://models.test/v1"\n'
+            'model = "test-model"\n'
+            f"\n[memory]\nenabled = {'true' if enabled else 'false'}\n",
+            encoding="utf-8",
+        )
+        captured.clear()
+        assert run_tui(workspace=tmp_path) == 0
+        return captured["memory"]
+
+    on = run(True)
+    assert isinstance(on, MemoryStore), "memory is on in config but the loop got no store"
+    assert on.config.enabled is True
+    assert on.db_path == loader.memory_db_path()
+    on.close()
+
+    assert run(False) is None, "memory is off but a store reached the loop anyway"
 
 
 async def test_the_tui_without_a_memory_store_never_mentions_recall(
