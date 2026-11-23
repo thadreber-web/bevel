@@ -31,7 +31,7 @@ from bevel.core.checkpoint import snapshot
 from bevel.core.memory.store import MemoryStore, MemoryType, repo_scope
 from bevel.core.messages import Message, ToolCall
 from bevel.core.session.resume import rebuild_transcript
-from bevel.core.session.store import SessionStore
+from bevel.core.session.store import SessionStore, TodoStore
 from bevel.core.tools.base import ToolResult
 from bevel.core.tools.types import ToolSpec
 from bevel.providers.base import Capabilities, ContentDelta, GenOptions, ProviderError, StreamEvent
@@ -941,3 +941,127 @@ async def test_the_tui_without_a_memory_store_never_mentions_recall(
 
     sent = app.provider.requests[0]["messages"]
     assert all("bevel recall" not in message.content for message in sent)
+
+
+# ------------------------------------------------------------------------ todos
+
+
+async def test_the_tui_writes_a_scripted_todo_list_to_the_database(
+    tmp_path: Path, isolated_homes: None
+) -> None:
+    """The whole user path: type a task, the model plans, the plan is on disk.
+
+    ``run_tui`` builds the todo store and hands it to the app, the app hands it
+    to the loop, and the loop assigns it the session id. Any one of those three
+    links going missing leaves the user with a tool that reports success and a
+    ``bevel todos`` that shows nothing, so the assertion is on the reopened
+    database rather than on the transcript.
+    """
+    call = tool_call(
+        "c1",
+        "todo",
+        {
+            "todos": [
+                {"content": "read the parser", "status": "done"},
+                {"content": "fix it", "status": "pending"},
+            ]
+        },
+    )
+    provider = MockProvider(
+        turns=[ScriptedTurn(content="", tool_calls=(call,)), ScriptedTurn(content="planned")]
+    )
+    store = SessionStore(loader.session_db_path())
+    todos = TodoStore(store.db_path)
+    app = BevelApp(
+        provider=provider,
+        workspace=tmp_path,
+        policy=PolicyConfig(mode=PolicyMode.AUTO, db_path=tmp_path / "policy.db"),
+        mode=RunMode.AUTO,
+        store=store,
+        todos=todos,
+    )
+    async with app.run_test() as pilot:
+        await submit(pilot, "fix the parser")
+        assert await settle(pilot, lambda: any("planned" in line for line in lines(app)))
+
+    assert app.store is not None
+    assert todos.session_id is not None, (
+        "the loop never told the todo store which session it was writing to"
+    )
+    reopened = TodoStore(store.db_path)
+    reopened.session_id = todos.session_id
+    assert [(t.content, str(t.status)) for t in reopened.list_todos()] == [
+        ("read the parser", "done"),
+        ("fix it", "pending"),
+    ], "the TUI never wired the todo store through to the loop"
+    reopened.close()
+    store.close()
+    todos.close()
+
+
+async def test_the_tui_without_a_todo_store_leaves_the_prompt_silent_on_todos(
+    tmp_path: Path, isolated_homes: None
+) -> None:
+    """No store means no guidance, so the model is not pushed at a tool that fails."""
+    provider = MockProvider(turns=[ScriptedTurn(content="plain")])
+    app = BevelApp(
+        provider=provider,
+        workspace=tmp_path,
+        policy=PolicyConfig(mode=PolicyMode.AUTO, db_path=tmp_path / "policy.db"),
+        mode=RunMode.AUTO,
+    )
+    async with app.run_test() as pilot:
+        await submit(pilot, "anything")
+        assert await settle(pilot, lambda: any("plain" in line for line in lines(app)))
+
+    sent = app.provider.requests[0]["messages"]
+    text = "\n".join(message.content for message in sent).lower()
+    # Not the bare word "todo": the project map lists ``tools/todo.py`` whether
+    # or not the feature is on. What must be absent is the guidance block.
+    assert "task tracking is on" not in text
+
+
+def test_run_tui_builds_a_todo_store_on_the_session_database_and_closes_it(
+    tmp_path: Path,
+    isolated_homes: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``run_tui`` owns the store's whole lifetime, so that is where this is proven.
+
+    Handing a store to ``BevelApp`` by hand proves the app passes it down; it
+    says nothing about the entry point ever building one, or about it being
+    closed when the app exits. A leaked connection is the kind of thing that
+    only shows up as a locked file on Windows.
+    """
+    for name in ("BEVEL_BASE_URL", "BEVEL_MODEL", "BEVEL_PROFILE", "BEVEL_CONFIG"):
+        monkeypatch.delenv(name, raising=False)
+
+    captured: dict[str, object] = {}
+
+    class RecordingApp:
+        def __init__(self, **kwargs: object) -> None:
+            captured.update(kwargs)
+            self.__dict__.update(kwargs)
+
+        async def run_async(self) -> int:
+            return 0
+
+    monkeypatch.setattr("bevel.tui.app.BevelApp", RecordingApp)
+    closed: list[TodoStore] = []
+    real_close = TodoStore.close
+    monkeypatch.setattr(TodoStore, "close", lambda self: (closed.append(self), real_close(self))[1])
+    config_dir = tmp_path / "config"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "config.toml").write_text(
+        '[profile.home]\nbase_url = "https://models.test/v1"\nmodel = "test-model"\n',
+        encoding="utf-8",
+    )
+
+    assert run_tui(workspace=tmp_path) == 0
+
+    todos = captured["todos"]
+    assert isinstance(todos, TodoStore), "the TUI never built a todo store"
+    assert todos.db_path == loader.session_db_path(), (
+        "todos live in sessions.db, not somewhere else"
+    )
+    assert closed == [todos], "the entry point left the todo store open"

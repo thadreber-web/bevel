@@ -20,7 +20,7 @@ from . import __version__
 from ._capability import CapabilityReport, probe
 from .core.checkpoint import restore
 from .core.memory.store import MemoryStore
-from .core.session.store import SessionStore
+from .core.session.store import SessionInfo, SessionStore, TodoStatus, TodoStore
 
 #: Subcommands that are planned but not built yet, mapped to the milestone
 #: that delivers them. Kept in one place so ``--help`` and the stub message
@@ -37,6 +37,13 @@ _PENDING: dict[str, str] = {
 #: There is no ``delete`` and none is planned: a wrong memory is superseded, so
 #: the chain of what bevel believed stays readable.
 _MEMORY_ACTIONS: tuple[str, ...] = ("list", "show", "supersede")
+
+#: How each status is drawn by ``bevel todos``.
+_TODO_MARKS: dict[TodoStatus, str] = {
+    TodoStatus.PENDING: " ",
+    TodoStatus.IN_PROGRESS: ">",
+    TodoStatus.DONE: "x",
+}
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -62,6 +69,14 @@ def build_parser() -> argparse.ArgumentParser:
     memories.add_argument("args", nargs="*", metavar="ARG", help="memory id(s) the action needs")
     resume = subparsers.add_parser("resume", help="reopen a session and continue it")
     resume.add_argument(
+        "session",
+        nargs="?",
+        help="session id or prefix (default: the most recent session for this directory)",
+    )
+    todos = subparsers.add_parser("todos", help="show a session's task list")
+    # Positionals only, as with `memories`: a `--flag` here would have to be read
+    # by this milestone, and TestParser rejects an option the code does not act on.
+    todos.add_argument(
         "session",
         nargs="?",
         help="session id or prefix (default: the most recent session for this directory)",
@@ -258,6 +273,74 @@ def _memories_supersede(store: MemoryStore, old: int, new: int, out: IO[str], er
     return 0
 
 
+def _resolve_session(
+    store: SessionStore, named: str | None, err: IO[str], command: str
+) -> SessionInfo | None:
+    """The session a bare-or-named positional refers to, or ``None`` after writing why.
+
+    Shared by ``resume`` and ``todos``, which resolve the argument identically:
+    nothing named means the most recent session for this directory, and a prefix
+    the store cannot resolve uniquely is the store's error to phrase.
+    """
+    if named is None:
+        session_id = store.latest_session_id(Path.cwd())
+        if session_id is None:
+            err.write(
+                f"bevel {command}: no stored session for {Path.cwd()}."
+                f" Name one with 'bevel {command} <id>' (see 'bevel sessions').\n"
+            )
+            return None
+        return store.resolve(session_id)
+    try:
+        return store.resolve(named)
+    except ValueError as exc:
+        err.write(f"bevel {command}: {exc}\n")
+        return None
+
+
+def _todos(named: str | None, out: IO[str], err: IO[str]) -> int:
+    """Print the task list a session left behind.
+
+    Read-only, and it does not create the database: on a fresh machine this says
+    so and exits 0, the way ``bevel sessions`` does. Clearing a list is the
+    model's job (it sends an empty list), not something the CLI offers -- a user
+    with a spare ``clear`` would be one mistyped id away from destroying the
+    plan they came to read.
+    """
+    from .config.loader import session_db_path  # noqa: PLC0415
+
+    store = TodoStore(session_db_path())
+    try:
+        if not store.db_path.exists():
+            out.write(f"bevel todos: no sessions have been stored yet ({store.db_path}).\n")
+            return 0
+        sessions = SessionStore(store.db_path)
+        try:
+            session = _resolve_session(sessions, named, err, "todos")
+        finally:
+            sessions.close()
+        if session is None:
+            return 2
+        store.session_id = session.id
+        todos = store.list_todos()
+        if not todos:
+            out.write(
+                f"bevel todos: no todos stored for session {session.id}"
+                f" ({_stamp(session.last_activity_at)}, {session.workspace}).\n"
+            )
+            return 0
+        done = sum(1 for todo in todos if todo.status is TodoStatus.DONE)
+        out.write(
+            f"session {session.id}  {_stamp(session.last_activity_at)}  {session.workspace}\n"
+        )
+        for todo in todos:
+            out.write(f"  [{_TODO_MARKS[todo.status]}] {todo.content}\n")
+        out.write(f"\n  {done} of {len(todos)} done\n")
+        return 0
+    finally:
+        store.close()
+
+
 def _resume(named: str | None) -> int:
     """Reopen a session in the TUI: a named one, or the most recent for here."""
     from .config.loader import session_db_path  # noqa: PLC0415
@@ -267,20 +350,10 @@ def _resume(named: str | None) -> int:
         if not store.db_path.exists():
             sys.stderr.write(f"bevel resume: no sessions have been stored yet ({store.db_path}).\n")
             return 2
-        if named is None:
-            session_id = store.latest_session_id(Path.cwd())
-            if session_id is None:
-                sys.stderr.write(
-                    f"bevel resume: no stored session for {Path.cwd()}."
-                    " Name one with 'bevel resume <id>' (see 'bevel sessions').\n"
-                )
-                return 2
-        else:
-            try:
-                session_id = store.resolve(named).id
-            except ValueError as exc:
-                sys.stderr.write(f"bevel resume: {exc}\n")
-                return 2
+        session = _resolve_session(store, named, sys.stderr, "resume")
+        if session is None:
+            return 2
+        session_id = session.id
     finally:
         store.close()
 
@@ -310,6 +383,9 @@ def main(argv: Sequence[str] | None = None) -> int:  # noqa: PLR0911 - one exit 
 
     if args.command == "resume":
         return _resume(args.session)
+
+    if args.command == "todos":
+        return _todos(args.session, sys.stdout, sys.stderr)
 
     if args.command in _PENDING:
         return _not_implemented(args.command, sys.stderr)

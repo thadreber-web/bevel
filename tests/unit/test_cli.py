@@ -21,7 +21,7 @@ from bevel.core.checkpoint import snapshot
 from bevel.core.memory.store import MemoryStore, MemoryType
 from bevel.core.messages import Message
 from bevel.core.session import store as session_store
-from bevel.core.session.store import SessionStore
+from bevel.core.session.store import SessionStore, Todo, TodoStatus, TodoStore
 
 
 def _pin_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
@@ -455,6 +455,152 @@ class TestResume:
         assert "no stored session for" in err
         assert "bevel sessions" in err
         assert launched == []
+
+
+class TestTodos:
+    """``bevel todos [id]`` -- the only user-facing surface for the list this milestone adds.
+
+    A tracker nobody can read is a fake, so these assert on what the terminal
+    actually shows: the tasks, in order, with their statuses, and the count.
+    """
+
+    def _seed(
+        self,
+        db: Path,
+        workspace: Path,
+        *items: tuple[str, str],
+    ) -> str:
+        sessions = SessionStore(db)
+        info = sessions.create_session(workspace=workspace, provider="v", model="m")
+        sessions.close()
+        store = TodoStore(db)
+        store.session_id = info.id
+        store.replace(
+            [Todo(content=content, status=TodoStatus(status)) for content, status in items]
+        )
+        store.close()
+        return info.id
+
+    def test_reading_on_a_fresh_machine_creates_no_database(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        db = _pin_db(tmp_path, monkeypatch)
+        assert main(["todos"]) == 0
+        assert "no sessions have been stored yet" in capsys.readouterr().out
+        assert not db.exists(), "reading todos must not create a database"
+
+    def test_the_list_is_printed_in_order_with_its_statuses(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        db = _pin_db(tmp_path, monkeypatch)
+        self._seed(
+            db,
+            tmp_path,
+            ("read the parser", "done"),
+            ("fix the grammar", "in_progress"),
+            ("add a test", "pending"),
+        )
+        monkeypatch.chdir(tmp_path)
+        assert main(["todos"]) == 0
+        out = capsys.readouterr().out
+        assert "[x] read the parser" in out
+        assert "[>] fix the grammar" in out
+        assert "[ ] add a test" in out
+        assert (
+            out.index("read the parser") < out.index("fix the grammar") < out.index("add a test")
+        ), "the list came out reordered; the order is the plan"
+        assert "1 of 3 done" in out
+
+    def test_a_named_session_or_prefix_reads_that_session(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        db = _pin_db(tmp_path, monkeypatch)
+        mine = self._seed(db, tmp_path, ("mine", "pending"))
+        self._seed(db, tmp_path, ("theirs", "done"))
+        capsys.readouterr()
+
+        assert main(["todos", mine[:6]]) == 0
+        out = capsys.readouterr().out
+        assert "mine" in out
+        assert "theirs" not in out, "reading one session showed another's plan"
+        assert mine in out
+
+    def test_the_default_is_the_most_recent_session_for_this_directory(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        db = _pin_db(tmp_path, monkeypatch)
+        here = tmp_path / "here"
+        here.mkdir()
+        self._seed(db, tmp_path / "elsewhere", ("not mine", "pending"))
+        mine = self._seed(db, here, ("mine", "pending"))
+        capsys.readouterr()
+        monkeypatch.chdir(here)
+
+        assert main(["todos"]) == 0
+        out = capsys.readouterr().out
+        assert mine in out
+        assert "not mine" not in out
+
+    def test_a_session_with_no_todos_says_so_rather_than_printing_nothing(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        db = _pin_db(tmp_path, monkeypatch)
+        sessions = SessionStore(db)
+        info = sessions.create_session(workspace=tmp_path, provider="v", model="m")
+        sessions.close()
+        assert main(["todos", info.id]) == 0
+        out = capsys.readouterr().out
+        assert "no todos stored" in out
+        assert info.id in out
+
+    def test_an_unknown_id_fails_naming_what_was_asked_for(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        db = _pin_db(tmp_path, monkeypatch)
+        self._seed(db, tmp_path, ("anything", "pending"))
+        assert main(["todos", "nosuchid"]) == 2
+        assert "no session id starts with 'nosuchid'" in capsys.readouterr().err
+
+    def test_a_session_from_another_directory_is_not_the_default(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        db = _pin_db(tmp_path, monkeypatch)
+        store = SessionStore(db)
+        store.create_session(workspace=tmp_path / "elsewhere", provider="v", model="m")
+        store.close()
+        here = tmp_path / "here"
+        here.mkdir()
+        monkeypatch.chdir(here)
+        assert main(["todos"]) == 2
+        err = capsys.readouterr().err
+        assert "no stored session for" in err
+        assert "bevel sessions" in err
+
+    def test_a_cleared_list_reads_back_empty(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """The model clears its list by sending an empty one; the CLI must agree."""
+        db = _pin_db(tmp_path, monkeypatch)
+        session_id = self._seed(db, tmp_path, ("was here", "done"))
+        store = TodoStore(db)
+        store.session_id = session_id
+        store.replace(())
+        store.close()
+        capsys.readouterr()
+
+        assert main(["todos", session_id]) == 0
+        assert "no todos stored" in capsys.readouterr().out
+
+    def test_the_subcommand_takes_positionals_only(self) -> None:
+        """A flag here would have to be read by this milestone, and none is."""
+        action = next(
+            action
+            for action in build_parser()._subparsers._group_actions  # type: ignore[union-attr]
+            if action.choices and "todos" in action.choices
+        )
+        parser = action.choices["todos"]
+        options = {option for item in parser._actions for option in item.option_strings}
+        assert options == {"-h", "--help"}
 
 
 class TestUndo:

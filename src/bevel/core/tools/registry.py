@@ -24,6 +24,7 @@ from bevel.core.tools.grep import GrepTool
 from bevel.core.tools.memory import RecallTool, RememberTool
 from bevel.core.tools.read import ReadTool
 from bevel.core.tools.shell import ShellTool
+from bevel.core.tools.todo import TodoTool
 from bevel.core.tools.types import ToolSpec
 from bevel.core.tools.write import WriteTool
 
@@ -33,6 +34,7 @@ _TOOLS: Final[tuple[Tool, ...]] = (
     GrepTool(),
     GlobTool(),
     RecallTool(),
+    TodoTool(),
     WriteTool(),
     EditTool(),
     RememberTool(),

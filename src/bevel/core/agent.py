@@ -80,7 +80,7 @@ from bevel.core.policy import (
     allow_all_policy,
 )
 from bevel.core.session.resume import ResumedSession
-from bevel.core.session.store import SessionStore
+from bevel.core.session.store import SessionStore, TodoStore
 from bevel.core.tools.base import RiskTier, Tool, ToolContext, ToolResult, call_tool
 from bevel.core.tools.registry import tools as builtin_tools
 from bevel.core.tools.types import ToolSpec
@@ -125,8 +125,9 @@ DEFAULT_CONCURRENCY: Final[int] = 4
 
 _SEAM_L3: Final[str] = (
     "m08 (L3 compaction) is not built: when L1 and L2 cannot fit the transcript in the "
-    "window the run stops with context_overflow, rather than restarting the context from "
-    "the project map, todos and recalled memory. m09 supplies the todos and memory it needs"
+    "window the run stops with context_overflow. The project map, the todo list and "
+    "recalled memory all exist now, but nothing composes them into a handoff brief or "
+    "carries the task into a fresh context, so an over-long run ends instead of continuing"
 )
 
 #: What this loop does *not* do, in the words the loop itself reports.
@@ -169,6 +170,24 @@ MEMORY_SYSTEM: Final[str] = (
     "-- memory only helps a later session if you use it now. Correcting an "
     "earlier memory means saving the new one and superseding the old. "
     "`remember` writes outside the workspace, so it may pause for your approval."
+)
+
+#: Appended to the system prompt when a todo store is attached.
+#:
+#: Same reasoning as :data:`MEMORY_SYSTEM`: the schema tells the model the tool
+#: exists, not that it should use it, and the registry offers ``todo`` whether or
+#: not a store is attached -- guidance that ignored the flag would have the
+#: model spending calls on a tool that can only fail. The wording is weighted
+#: toward *replacing* the list, because that is the one thing a model gets wrong
+#: in the direction that is invisible: it appends, and nobody notices the list
+#: has grown tasks it abandoned three turns ago.
+TODO_SYSTEM: Final[str] = (
+    "Task tracking is on for this run. Use `todo` to keep a plan for any task "
+    "with more than a couple of steps. Send the complete list every time -- it "
+    "replaces what is stored, it does not append -- so marking a task done means "
+    "sending the same list again with that task's status set to 'done'. Keep "
+    "exactly one task 'in_progress' while you work, and mark it 'done' only once "
+    "it has actually been verified. Send an empty list when the work is finished."
 )
 
 #: What L2's summariser is told to do. Kept out of the loop so the one place that
@@ -505,6 +524,7 @@ class Agent:
         store: SessionStore | None = None,
         resume: ResumedSession | None = None,
         memory: MemoryStore | None = None,
+        todos: TodoStore | None = None,
     ) -> None:
         if budgets.max_iterations < 1:
             raise ValueError("max_iterations must be at least 1")
@@ -519,7 +539,8 @@ class Agent:
             # talking to it. Recall refuses to compare vectors across models, so
             # tagging them with *this* provider is what makes them comparable.
             memory.embedder = provider
-        self.ctx = ToolContext(Path(workspace), memory)
+        self._todos = todos
+        self.ctx = ToolContext(Path(workspace), memory, todos)
         self.system = system
         self.options = options
         self.budgets = budgets
@@ -692,6 +713,8 @@ class Agent:
         system = self.system
         if self._memory is not None:
             system = f"{system}\n\n{MEMORY_SYSTEM}"
+        if self._todos is not None:
+            system = f"{system}\n\n{TODO_SYSTEM}"
         state.messages.append(Message.system(f"{system}\n\n{project_map}"))
         block = await self._recall_block(task)
         if block is not None:
@@ -840,11 +863,18 @@ class Agent:
 
     def _open_session(self) -> None:
         """Create the session row this run writes through, unless resuming one."""
-        if self._store is None or self._session_id is not None:
-            return
-        self._session_id = self._store.create_session(
-            workspace=self.ctx.workspace, provider=self.provider.name, model=self.provider.model
-        ).id
+        if self._store is not None and self._session_id is None:
+            self._session_id = self._store.create_session(
+                workspace=self.ctx.workspace,
+                provider=self.provider.name,
+                model=self.provider.model,
+            ).id
+        if self._todos is not None:
+            # The tool object is built before a session id exists, so the store
+            # learns it here -- the same way MemoryStore learns its embedder.
+            # Assigned on the resume path and the store-less path too, so the
+            # todo tool's idea of the session is always the loop's.
+            self._todos.session_id = self._session_id
 
     def _persist(self, message: Message, iteration: int = 1) -> None:
         """Append one message. Commits immediately: a completed message is recoverable.
@@ -958,7 +988,7 @@ class Agent:
                 state.error = (
                     f"transcript will not fit: l1 and l2 left {against}. The L3 handoff that "
                     "would restart the context from the project map, todos and recalled memory "
-                    "is not built (m09 supplies its inputs)."
+                    "is not built."
                 )
                 logger.warning("compaction exhausted: %s", state.error)
                 return (

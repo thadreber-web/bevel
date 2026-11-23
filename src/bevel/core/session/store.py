@@ -16,6 +16,7 @@ import os
 import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from enum import StrEnum
 from pathlib import Path
 from secrets import token_hex
 from typing import TYPE_CHECKING
@@ -23,6 +24,8 @@ from typing import TYPE_CHECKING
 from bevel.core.messages import Message, ToolCall
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     # Type-only: agent.py owns the store, so importing it at runtime would close
     # a cycle. Nothing below needs the class object, only its attributes.
     from bevel.core.agent import ToolExecution
@@ -87,6 +90,15 @@ CREATE TABLE IF NOT EXISTS usage (
     created_at        TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS usage_session ON usage (session_id, id);
+
+CREATE TABLE IF NOT EXISTS todos (
+    id          INTEGER PRIMARY KEY,
+    session_id  TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    position    INTEGER NOT NULL,
+    content     TEXT NOT NULL,
+    status      TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS todos_session ON todos (session_id, position);
 """
 
 
@@ -147,6 +159,27 @@ class UsageRow:
     completion_tokens: int
     reasoning_tokens: int
     total_tokens: int
+
+
+class TodoStatus(StrEnum):
+    """Where a task is. Three states, because more invite model invention."""
+
+    PENDING = "pending"
+    IN_PROGRESS = "in_progress"
+    DONE = "done"
+
+
+@dataclass(frozen=True)
+class Todo:
+    """One row of the ``todos`` table.
+
+    Position is not a field: it is the order the rows come back in, which is
+    the order the model sent them. A model that wants to reorder a list sends
+    it reordered.
+    """
+
+    content: str
+    status: TodoStatus
 
 
 def _now() -> str:
@@ -416,6 +449,84 @@ class SessionStore:
         )
 
 
+class TodoStore:
+    """``todos`` in ``sessions.db``: the per-session task list the model keeps.
+
+    The list is replaced wholesale rather than edited item by item, so there is
+    no id to hand the model and nothing for it to misremember. A model that
+    wants to mark a task done sends the whole list again with that task done,
+    which is the only interface a small model gets reliably right.
+
+    ``session_id`` is assigned by the agent once a session is open, the same
+    way ``MemoryStore.embedder`` is assigned after construction: the tool
+    object is built before the session id exists. It is public and mutable on
+    purpose; the tool refuses to run while it is ``None``.
+    """
+
+    def __init__(self, db_path: Path) -> None:
+        self._db_path = Path(db_path)
+        self._connection: sqlite3.Connection | None = None
+        self.session_id: str | None = None
+
+    @property
+    def db_path(self) -> Path:
+        return self._db_path
+
+    def _connect(self) -> sqlite3.Connection:
+        if self._connection is None:
+            self._db_path.parent.mkdir(parents=True, exist_ok=True)
+            self._connection = sqlite3.connect(self._db_path)
+            self._connection.execute("PRAGMA foreign_keys = ON")
+            self._connection.executescript(_SCHEMA)
+            self._connection.commit()
+        return self._connection
+
+    def _require_session(self) -> str:
+        if self.session_id is None:
+            raise ValueError("TodoStore has no session: no session has been opened yet")
+        return self.session_id
+
+    def close(self) -> None:
+        if self._connection is not None:
+            self._connection.close()
+            self._connection = None
+
+    def replace(self, todos: Sequence[Todo]) -> None:
+        """Make the stored list exactly ``todos``, in order.
+
+        Delete and insert share one transaction so a reader never sees the list
+        half-replaced, and so a crash leaves the previous list intact.
+        """
+        session_id = self._require_session()
+        connection = self._connect()
+        with connection:
+            connection.execute("DELETE FROM todos WHERE session_id = ?", (session_id,))
+            connection.executemany(
+                "INSERT INTO todos (session_id, position, content, status) VALUES (?, ?, ?, ?)",
+                [
+                    (session_id, position, todo.content, str(todo.status))
+                    for position, todo in enumerate(todos)
+                ],
+            )
+
+    def list_todos(self) -> tuple[Todo, ...]:
+        """The list in the order it was sent."""
+        session_id = self._require_session()
+        rows = (
+            self._connect()
+            .execute(
+                "SELECT content, status FROM todos WHERE session_id = ? ORDER BY position",
+                (session_id,),
+            )
+            .fetchall()
+        )
+        return tuple(_row_to_todo(row) for row in rows)
+
+
+def _row_to_todo(row: tuple[object, ...]) -> Todo:
+    return Todo(content=str(row[0]), status=TodoStatus(str(row[1])))
+
+
 def _row_to_session(row: tuple[object, ...]) -> SessionInfo:
     return SessionInfo(
         id=str(row[0]),
@@ -470,5 +581,8 @@ __all__ = [
     "SessionStore",
     "StoredToolCall",
     "StoredTurn",
+    "Todo",
+    "TodoStatus",
+    "TodoStore",
     "UsageRow",
 ]

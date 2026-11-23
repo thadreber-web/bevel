@@ -54,7 +54,7 @@ from bevel.core.memory.store import MemoryStore
 from bevel.core.messages import ToolCall
 from bevel.core.policy.approvals import Approval, ApprovalRequest, Approver, Decision
 from bevel.core.session.resume import ResumedSession, rebuild_transcript
-from bevel.core.session.store import SessionStore, StoredToolCall
+from bevel.core.session.store import SessionStore, StoredToolCall, TodoStore
 from bevel.core.tools.base import ToolResult
 from bevel.providers.base import ModelProvider
 from bevel.providers.registry import Registry
@@ -133,6 +133,7 @@ class BevelApp(App[None]):
         store: SessionStore | None = None,
         resume: ResumedSession | None = None,
         memory: MemoryStore | None = None,
+        todos: TodoStore | None = None,
     ) -> None:
         super().__init__()
         self.provider = provider
@@ -142,6 +143,7 @@ class BevelApp(App[None]):
         self.store = store
         self.resume = resume
         self.memory = memory
+        self.todos = todos
         self._agent: Agent | None = None
         self._content: ContentBlock | None = None
         self._reasoning: ReasoningBlock | None = None
@@ -281,6 +283,7 @@ class BevelApp(App[None]):
             store=self.store,
             resume=self.resume,
             memory=self.memory,
+            todos=self.todos,
         )
         self._agent = agent
         try:
@@ -557,12 +560,17 @@ def run_tui(workspace: Path | str | None = None, resume: str | None = None) -> i
     # injected -- which is the difference between "memory is off" and "memory
     # is broken and nobody noticed".
     memory = MemoryStore(memory_db_path(), config=config.memory) if config.memory.enabled else None
+    # Same reasoning as the memory store: constructing it opens nothing, so this
+    # is cheap whenever a session store exists. It shares sessions.db, and the
+    # agent assigns its session id once one is open.
+    todos = TodoStore(store.db_path)
     resumed: ResumedSession | None = None
     if resume is not None:
         try:
             info = store.resolve(resume)
         except ValueError as exc:
             store.close()
+            todos.close()
             sys.stderr.write(f"bevel resume: {exc}\n")
             return 2
         resumed = rebuild_transcript(store, info.id)
@@ -573,6 +581,7 @@ def run_tui(workspace: Path | str | None = None, resume: str | None = None) -> i
         store=store,
         resume=resumed,
         memory=memory,
+        todos=todos,
     )
     return asyncio.run(_close_after(app, registry))
 
@@ -586,4 +595,6 @@ async def _close_after(app: BevelApp, registry: Registry) -> int:
             app.store.close()
         if app.memory is not None:
             app.memory.close()
+        if app.todos is not None:
+            app.todos.close()
     return 0

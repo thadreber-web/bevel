@@ -128,7 +128,7 @@ loop never fakes the behaviour it stands in for:
 
 | Seam | Arrives with |
 |---|---|
-| L3 compaction — restart the context from the project map, todos and recalled memory | m09, which supplies the todos and memory it needs |
+| L3 compaction — restart the context from the project map, todos and recalled memory | m08d. Its three inputs all exist now (m08a, m09a, m09b); what is missing is composing them into a handoff brief and continuing in a fresh context |
 
 L1 and L2 are **not** in this list: they run, and their `COMPACTION` events carry the
 numbers that prove it. Neither is session persistence: every turn, tool call and
@@ -158,6 +158,14 @@ the endpoint would reject, and says how much it trimmed rather than hiding it.
 The `system` message is deliberately **not** stored. A resumed run rebuilds it, so
 the project map is the current tree rather than the one from when the session was
 opened; the conversation itself is what comes back from the file.
+
+The same file also holds the session's plan, in a `todos` table — see
+`core/tools/todo.py` and the Todos section of the README. `TodoStore` is a sibling of
+`SessionStore` rather than a method on it, and takes its `session_id` as a mutable
+attribute, because the tool object is constructed before a session row exists; the
+loop assigns it in `_open_session()` on every path, so the tool's idea of the session
+is always the loop's. With no session id there is nothing to write, and the tool says
+so instead of storing an orphan row.
 
 `bevel sessions` lists what is stored and `bevel resume [id]` reopens it (with no id,
 the most recent session for the current directory). The database lives at

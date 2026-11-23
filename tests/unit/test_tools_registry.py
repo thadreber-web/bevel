@@ -16,10 +16,12 @@ from bevel.core.tools import registry
 from bevel.core.tools.base import RiskTier, Tool, ToolContext, call_tool
 from bevel.core.tools.schema import unsupported_keywords
 
-# The six m03 tools, plus the two memory tools m09a adds. Recall sits with the
-# other read-only tools and remember with the writers, so the order the model
-# sees groups by what a tool does to the world.
-OFFERED_TOOLS = ["read", "grep", "glob", "recall", "write", "edit", "remember", "shell"]
+# The six m03 tools, plus the two memory tools m09a adds and the todo tool m09b
+# adds. Recall sits with the other read-only tools, todo with them too -- it is
+# the model's own scratch list, not something it does to the world -- and
+# remember with the writers, so the order the model sees groups by what a tool
+# does to the world.
+OFFERED_TOOLS = ["read", "grep", "glob", "recall", "todo", "write", "edit", "remember", "shell"]
 NAME_RE = re.compile(r"^[a-z][a-z0-9_]*$")
 
 

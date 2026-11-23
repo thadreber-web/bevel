@@ -27,6 +27,7 @@ from bevel.core.tools.types import ToolSpec
 
 if TYPE_CHECKING:
     from bevel.core.memory.store import MemoryStore
+    from bevel.core.session.store import TodoStore
 
 
 class RiskTier(StrEnum):
@@ -123,6 +124,9 @@ class ToolContext:
     #: Long-term memory, or ``None`` when it is not configured. Optional and
     #: last so that every existing ``ToolContext(workspace)`` call is unchanged.
     memory: MemoryStore | None = None
+    #: The session's todo list, or ``None`` when no session store is attached.
+    #: Optional and last, for the same reason as ``memory``.
+    todos: TodoStore | None = None
 
     def __post_init__(self) -> None:
         # Resolving here rather than per call: ``resolve()`` follows symlinks
