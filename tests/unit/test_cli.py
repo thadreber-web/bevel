@@ -19,6 +19,7 @@ from bevel.cli import _PENDING, build_parser, main
 from bevel.config import loader
 from bevel.core.checkpoint import snapshot
 from bevel.core.messages import Message
+from bevel.core.session import store as session_store
 from bevel.core.session.store import SessionStore
 
 
@@ -211,13 +212,24 @@ class TestResume:
         capsys: pytest.CaptureFixture[str],
         launched: list[str | None],
     ) -> None:
-        """Resuming the wrong session silently rewrites an unrelated history."""
+        """Resuming the wrong session silently rewrites an unrelated history.
+
+        The ids are forced to share a prefix rather than left to chance: with 64
+        random 16-hex-char ids there is a ~1.8% chance that none of them share
+        any prefix, which made this test fail with ``StopIteration`` for reasons
+        that had nothing to do with the behaviour under test.
+        """
         db = _pin_db(tmp_path, monkeypatch)
+        counter = iter(range(64))
+        monkeypatch.setattr(
+            session_store, "token_hex", lambda _n: f"a1b2{next(counter):012x}", raising=True
+        )
         store = SessionStore(db)
         ids = [
             store.create_session(workspace=tmp_path, provider="v", model="m").id for _ in range(64)
         ]
         store.close()
+        assert len(set(ids)) == 64
         shared = next(
             prefix
             for prefix in (ids[0][:i] for i in range(1, len(ids[0]) + 1))
