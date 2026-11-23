@@ -183,6 +183,29 @@ class TestMemories:
         assert "decision" in out
         assert str(db) in out
 
+    def test_a_long_scope_does_not_swallow_the_content_column(
+        self, db: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """A real scope is a normalised remote, which is longer than the column.
+
+        ``str:<N`` pads but never truncates, so a scope over the column width
+        runs straight into the content and the table stops being a table. Every
+        other test here files under ``global``, six characters wide, which is why
+        none of them noticed.
+        """
+        store = MemoryStore(db)
+        scope = "repo:github.com/thadreber-web/bevel"
+        store.add(content="we use uv, not pip", type=MemoryType.DECISION, scope=scope)
+        store.close()
+        assert len(scope) > 34, "the fixture must be wider than the scope column"
+
+        assert main(["memories", "list"]) == 0
+        out = capsys.readouterr().out
+        row = next(line for line in out.splitlines() if "we use uv" in line)
+        assert f"{scope}we use" not in row, "the scope column ran into the content column"
+        assert "repo:github.com/thadreber-web/be..." in row, "the scope was dropped, not elided"
+        assert "we use uv, not pip" in row
+
     def test_a_superseded_memory_is_hidden_from_list_but_still_readable(
         self, db: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:

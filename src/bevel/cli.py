@@ -221,10 +221,12 @@ def _memories_list(store: MemoryStore, out: IO[str]) -> int:
         return 0
     out.write(f"{'id':>6}  {'type':<9}{'created':<17}{'scope':<34}content\n")
     for row in rows:
+        # ``str:<N`` pads but never truncates, so anything wider than its column
+        # runs into the next one. A real scope is a normalised remote URL, which
+        # routinely is.
+        scope = row.scope if len(row.scope) <= 33 else f"{row.scope[:32]}..."
         content = row.content if len(row.content) <= 72 else f"{row.content[:71]}..."
-        out.write(
-            f"{row.id:>6}  {row.type!s:<9}{_stamp(row.created_at):<17}{row.scope:<34}{content}\n"
-        )
+        out.write(f"{row.id:>6}  {row.type!s:<9}{_stamp(row.created_at):<17}{scope:<34}{content}\n")
     hidden = len(store.list_memories(include_superseded=True)) - len(rows)
     note = f", {hidden} superseded" if hidden else ""
     out.write(f"\n  {len(rows)} active memory(ies){note} in {store.db_path}\n")
