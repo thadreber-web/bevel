@@ -693,7 +693,9 @@ class Agent:
         if self._memory is None:
             return None
         try:
-            block = await memory_block(self._memory, self.provider, query=task)
+            block = await memory_block(
+                self._memory, self.provider, query=task, workspace=self.ctx.workspace
+            )
         except Exception:
             # Memory is an enhancement, not a dependency: a broken store must
             # not cost the user the task they actually asked for.

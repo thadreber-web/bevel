@@ -16,7 +16,7 @@ import pytest
 
 from bevel.config.schema import MemoryConfig
 from bevel.core.agent import Agent
-from bevel.core.memory.store import MemoryStore, MemoryType
+from bevel.core.memory.store import MemoryStore, MemoryType, repo_scope
 from bevel.core.policy import allow_all_policy
 from bevel.providers.base import Capabilities
 from bevel.providers.mock import MockProvider, ScriptedTurn
@@ -48,6 +48,29 @@ async def test_recalled_memory_is_in_the_opening_request(tmp_path: Path) -> None
     text = "\n".join(message.content for message in sent)
     assert MATCHED in text
     assert UNMATCHED not in text, "an irrelevant memory reached the model"
+
+
+async def test_a_memory_stored_for_the_workspace_is_injected(tmp_path: Path) -> None:
+    """The opening context looks in the *workspace's* scope, not the process's.
+
+    ``remember`` files a memory under the agent's workspace, so injection has to
+    read from the same place. Deriving the scope from ``Path.cwd()`` instead
+    passes every global-scope test and silently finds nothing the moment bevel
+    is started from anywhere other than the project it is working on -- which is
+    the normal case, since the TUI is launched from a shell in some other folder.
+    """
+    provider = MockProvider(turns=[ScriptedTurn(content="hi")])
+    store = MemoryStore(tmp_path / "memories.db", config=MemoryConfig(enabled=True))
+    scope = await repo_scope(tmp_path)
+    assert not scope.startswith("global"), "the fixture must exercise the per-repo tier"
+    store.add(content=MATCHED, type=MemoryType.FACT, scope=scope)
+
+    await _agent(tmp_path, provider, store).run(QUERY)
+
+    sent = provider.requests[0]["messages"]
+    assert isinstance(sent, list)
+    text = "\n".join(message.content for message in sent)
+    assert MATCHED in text, "a memory filed under the workspace scope was never recalled"
 
 
 async def test_the_memory_message_is_not_messages_zero(tmp_path: Path) -> None:
