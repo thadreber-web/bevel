@@ -51,9 +51,16 @@ TOKEN: Final[str] = f"zq{secrets.token_hex(3)}"
 #: the token, so FTS5 matches on the words and the token can only come from the
 #: stored row -- a query that shared nothing would recall nothing, and a store
 #: that returned everything would pass a test that shared the token too.
-MEMORY: Final[str] = f"The deploy passphrase for the bevel widget service is {TOKEN}."
+#:
+#: Deliberately not a secret. An earlier revision stored a "deploy passphrase"
+#: and asked for it, and the model's reasoning filled up with whether it was
+#: allowed to disclose a credential. Asking a safety-tuned endpoint to repeat a
+#: passphrase is a needless way to lose a run to a refusal, so the fixture asks
+#: for a branch name instead: still a token only the stored row can supply, and
+#: nothing for an aligned model to reasonably withhold.
+MEMORY: Final[str] = f"The bevel widget service deploys from the branch {TOKEN}."
 QUESTION: Final[str] = (
-    "What is the deploy passphrase for the bevel widget service? Answer with just the passphrase."
+    "What branch does the bevel widget service deploy from? Answer with just the branch name."
 )
 
 #: Temperature 0 is not bit-reproducible on a batching server, so a small model
@@ -177,8 +184,8 @@ async def test_the_model_can_call_recall_itself(
             memory=store,
         )
         result = await agent.run(
-            "Before answering, use the recall tool to look up the deploy passphrase for "
-            "the bevel widget service. Then answer with just the passphrase."
+            "Before answering, use the recall tool to look up the branch the bevel widget "
+            "service deploys from. Then answer with just the branch name."
         )
         assert result.stop_reason is StopReason.COMPLETED, result.error
 
