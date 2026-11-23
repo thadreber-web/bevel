@@ -39,7 +39,7 @@ from textual.screen import ModalScreen
 from textual.widget import Widget
 from textual.widgets import Footer, Header, Input, Static
 
-from bevel.config.loader import capability_cache_path, load, session_db_path
+from bevel.config.loader import capability_cache_path, load, memory_db_path, session_db_path
 from bevel.config.schema import ConfigError, PolicyConfig, PolicyMode
 from bevel.core.agent import (
     UNBUILT_SEAMS,
@@ -50,6 +50,7 @@ from bevel.core.agent import (
     ToolOutcome,
 )
 from bevel.core.checkpoint import list_checkpoints, restore
+from bevel.core.memory.store import MemoryStore
 from bevel.core.messages import ToolCall
 from bevel.core.policy.approvals import Approval, ApprovalRequest, Approver, Decision
 from bevel.core.session.resume import ResumedSession, rebuild_transcript
@@ -131,6 +132,7 @@ class BevelApp(App[None]):
         mode: RunMode = RunMode.DEFAULT,
         store: SessionStore | None = None,
         resume: ResumedSession | None = None,
+        memory: MemoryStore | None = None,
     ) -> None:
         super().__init__()
         self.provider = provider
@@ -139,6 +141,7 @@ class BevelApp(App[None]):
         self.mode = mode
         self.store = store
         self.resume = resume
+        self.memory = memory
         self._agent: Agent | None = None
         self._content: ContentBlock | None = None
         self._reasoning: ReasoningBlock | None = None
@@ -277,6 +280,7 @@ class BevelApp(App[None]):
             approver=self._approver(),
             store=self.store,
             resume=self.resume,
+            memory=self.memory,
         )
         self._agent = agent
         try:
@@ -547,6 +551,12 @@ def run_tui(workspace: Path | str | None = None, resume: str | None = None) -> i
         cache_path=capability_cache_path(),
     )
     store = SessionStore(session_db_path())
+    # Constructing a MemoryStore opens nothing, so the gate is purely whether
+    # the feature is on. When it is off the app gets None, the remember/recall
+    # tools refuse with "not configured for this session", and no block is
+    # injected -- which is the difference between "memory is off" and "memory
+    # is broken and nobody noticed".
+    memory = MemoryStore(memory_db_path(), config=config.memory) if config.memory.enabled else None
     resumed: ResumedSession | None = None
     if resume is not None:
         try:
@@ -562,6 +572,7 @@ def run_tui(workspace: Path | str | None = None, resume: str | None = None) -> i
         policy=config.policy,
         store=store,
         resume=resumed,
+        memory=memory,
     )
     return asyncio.run(_close_after(app, registry))
 
@@ -573,4 +584,6 @@ async def _close_after(app: BevelApp, registry: Registry) -> int:
         await registry.aclose()
         if app.store is not None:
             app.store.close()
+        if app.memory is not None:
+            app.memory.close()
     return 0

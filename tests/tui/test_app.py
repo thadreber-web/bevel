@@ -25,9 +25,10 @@ from textual.pilot import Pilot
 from textual.widgets import Static
 
 from bevel.config import loader
-from bevel.config.schema import PolicyConfig, PolicyMode
+from bevel.config.schema import MemoryConfig, PolicyConfig, PolicyMode
 from bevel.core.agent import UNBUILT_SEAMS, Agent, ToolOutcome
 from bevel.core.checkpoint import snapshot
+from bevel.core.memory.store import MemoryStore, MemoryType, repo_scope
 from bevel.core.messages import Message, ToolCall
 from bevel.core.session.resume import rebuild_transcript
 from bevel.core.session.store import SessionStore
@@ -39,6 +40,11 @@ from bevel.tui.app import ApprovalScreen, BevelApp, RunMode
 from bevel.tui.widgets.diff_viewer import DiffScreen, DiffView
 from bevel.tui.widgets.tool_cards import ToolCard
 from bevel.tui.widgets.transcript import REASONING_STYLE, ContentBlock, ReasoningBlock
+
+#: Shared by the memory tests. They share no words with each other or with the
+#: task, so a store that returned everything would fail the second assertion.
+MATCHED_MEMORY = "the auth middleware broke on empty tokens"
+UNMATCHED_MEMORY = "the caching layer indexes documents nightly"
 
 
 async def settle(
@@ -824,3 +830,57 @@ async def test_a_run_without_a_store_still_works(make_app: Callable[..., BevelAp
         await submit(pilot, "are you storing anything")
         assert await settle(pilot, lambda: any("no database needed" in line for line in lines(app)))
     assert not loader.session_db_path().exists()
+
+
+# ----------------------------------------------------------------------- memory
+
+
+async def test_the_tui_injects_recalled_memory_into_the_first_request(
+    tmp_path: Path, isolated_homes: None
+) -> None:
+    """`[memory] enabled = true` has to reach the loop through the TUI.
+
+    The agent already takes ``memory=`` and the tools are always offered, so a
+    store that is built but never handed over is the silent fake: config says
+    memory is on, and the model is shown nothing. The assertion is on the
+    request the provider actually received, not on a widget.
+
+    The relevant memory is filed under the *workspace* scope rather than
+    ``global``, so this also catches injection reading from the wrong tier: the
+    global tier is always searched, so a global-only fixture passes even when
+    the workspace scope is never looked at.
+    """
+    memory = MemoryStore(tmp_path / "memories.db", config=MemoryConfig(enabled=True))
+    memory.add(content=MATCHED_MEMORY, type=MemoryType.FACT, scope=await repo_scope(tmp_path))
+    memory.add(content=UNMATCHED_MEMORY, type=MemoryType.FACT, scope="global")
+
+    provider = MockProvider(turns=[ScriptedTurn(content="noted")])
+    app = BevelApp(
+        provider=provider,
+        workspace=tmp_path,
+        policy=PolicyConfig(mode=PolicyMode.AUTO, db_path=tmp_path / "policy.db"),
+        mode=RunMode.AUTO,
+        memory=memory,
+    )
+    async with app.run_test() as pilot:
+        await submit(pilot, "how does bevel handle auth middleware")
+        assert await settle(pilot, lambda: any("noted" in line for line in lines(app)))
+
+    sent = provider.requests[0]["messages"]
+    text = "\n".join(message.content for message in sent)
+    assert MATCHED_MEMORY in text, "the TUI never passed the memory store to the loop"
+    assert UNMATCHED_MEMORY not in text, "an irrelevant memory reached the model"
+    memory.close()
+
+
+async def test_the_tui_without_a_memory_store_never_mentions_recall(
+    make_app: Callable[..., BevelApp],
+) -> None:
+    """Memory off must be the pre-m09a TUI byte-for-byte, not an empty block."""
+    app = make_app(ScriptedTurn(content="plain"))
+    async with app.run_test() as pilot:
+        await submit(pilot, "anything from memory")
+        assert await settle(pilot, lambda: any("plain" in line for line in lines(app)))
+
+    sent = app.provider.requests[0]["messages"]
+    assert all("bevel recall" not in message.content for message in sent)
