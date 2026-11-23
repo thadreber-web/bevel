@@ -11,6 +11,13 @@ the policy engine returns an ask for ``WRITE_OUTSIDE`` before it ever looks at
 alternative -- declaring it ``READ`` to get out of the way -- would be exactly
 the inflated declaration the tier ladder exists to prevent.
 
+The one exception is ``[memory] auto_accept = true``, which lets the engine
+allow this tool by name. It exists because the model initiates these writes
+itself and learned rules cannot cover them: they are keyed on argv, and
+``remember`` has none, so ``a`` at the approval prompt has nothing to learn.
+The exemption is off by default, names only ``remember``, and does not reach a
+call whose path escapes the workspace jail.
+
 Both tools take the store from :attr:`ToolContext.memory`. The registry holds
 store-less instances so the tool list is stable whether or not memory is
 configured; a call without a store fails loudly instead of silently doing

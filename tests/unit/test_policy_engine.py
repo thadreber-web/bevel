@@ -9,12 +9,14 @@ tests supply an approver and assert what was *asked*, not what a person would sa
 from __future__ import annotations
 
 from collections.abc import Callable, Iterator, Mapping
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from bevel.config.schema import PolicyConfig, PolicyMode
+from bevel.config.schema import MemoryConfig, PolicyConfig, PolicyMode
+from bevel.core.memory.store import MemoryStore
 from bevel.core.messages import ToolCall
 from bevel.core.policy.approvals import (
     Approval,
@@ -89,9 +91,16 @@ def engines(ctx: ToolContext, tmp_path: Path) -> Iterator[Callable[..., PolicyEn
         allow: tuple[str, ...] = (),
         deny: tuple[str, ...] = (),
         approver: Approver | None = None,
+        auto_accept: bool = False,
     ) -> PolicyEngine:
         config = PolicyConfig(mode=mode, allow=allow, deny=deny, db_path=tmp_path / "policy.db")
-        engine = PolicyEngine(ctx, config=config, approver=approver)
+        # The engine reads the flag off the store on the context, which is the
+        # same object the tools use, so the two can never disagree. Attached
+        # even when the flag is off: "a store is present and opted out" is the
+        # common case, and it must still ask. The store opens no file until used.
+        memory = MemoryConfig(auto_accept=auto_accept)
+        engine_ctx = replace(ctx, memory=MemoryStore(tmp_path / "memories.db", config=memory))
+        engine = PolicyEngine(engine_ctx, config=config, approver=approver)
         created.append(engine)
         return engine
 
@@ -152,6 +161,78 @@ class TestTierContract:
         assert engine.decisions()[0].rule == "approver:tier:write_outside"
         await engine(_write(path="../out.py"))
         assert engine.decisions()[0].rule == "approver:path-jail"
+
+
+class TestRememberAutoAccept:
+    """``[memory] auto_accept`` silences the ``remember`` approval, and nothing else.
+
+    ``remember`` writes outside the workspace permanently, so the tier contract
+    says always-ask. The opt-out exists because the model initiates those writes
+    itself and there is no way to teach the engine to expect them: learned rules
+    are keyed on argv, and ``remember`` has none. So it is config, off by
+    default, scoped to one tool name, and it cannot widen to a second tool or to
+    a path that escapes the jail.
+    """
+
+    @staticmethod
+    def _remember() -> PolicyRequest:
+        return _request(FakeTool(RiskTier.WRITE_OUTSIDE, "remember"), name="remember")
+
+    @staticmethod
+    def _engine(
+        engines: Callable[..., PolicyEngine], *, auto_accept: bool, mode: PolicyMode
+    ) -> PolicyEngine:
+        return engines(mode=mode, approver=DenyAllApprover(), auto_accept=auto_accept)
+
+    @pytest.mark.parametrize("mode", list(PolicyMode))
+    async def test_remember_is_allowed_when_opted_in(
+        self, engines: Callable[..., PolicyEngine], mode: PolicyMode
+    ) -> None:
+        engine = self._engine(engines, auto_accept=True, mode=mode)
+        verdict = await engine(self._remember())
+        assert verdict.decision is Decision.ALLOW
+        assert engine.decisions()[0].rule == "config:memory:auto_accept"
+
+    @pytest.mark.parametrize("mode", list(PolicyMode))
+    async def test_remember_still_asks_by_default(
+        self, engines: Callable[..., PolicyEngine], mode: PolicyMode
+    ) -> None:
+        engine = self._engine(engines, auto_accept=False, mode=mode)
+        verdict = await engine(self._remember())
+        assert verdict.decision is Decision.DENY
+        assert engine.decisions()[0].rule == "approver:tier:write_outside"
+
+    async def test_the_opt_in_does_not_reach_a_second_tool(
+        self, engines: Callable[..., PolicyEngine]
+    ) -> None:
+        """Only ``remember`` is exempt. Another WRITE_OUTSIDE tool still asks."""
+        engine = self._engine(engines, auto_accept=True, mode=PolicyMode.AUTO)
+        verdict = await engine(_write(RiskTier.WRITE_OUTSIDE, "a.py"))
+        assert verdict.decision is Decision.DENY
+        assert engine.decisions()[0].rule == "approver:tier:write_outside"
+
+    async def test_the_opt_in_does_not_reach_an_escaping_path(
+        self, engines: Callable[..., PolicyEngine]
+    ) -> None:
+        """A tool named ``remember`` that also writes to a path outside the jail
+        is not the tool the config key was written for."""
+        engine = self._engine(engines, auto_accept=True, mode=PolicyMode.AUTO)
+        request = _request(
+            FakeTool(RiskTier.WRITE_OUTSIDE, "remember"),
+            name="remember",
+            arguments={"path": "../elsewhere.py"},
+        )
+        verdict = await engine(request)
+        assert verdict.decision is Decision.DENY
+        assert engine.decisions()[0].rule == "approver:path-jail"
+
+    async def test_the_reason_says_the_user_opted_in(
+        self, engines: Callable[..., PolicyEngine]
+    ) -> None:
+        """An approval-free write must be traceable to the key that allowed it."""
+        engine = self._engine(engines, auto_accept=True, mode=PolicyMode.AUTO)
+        verdict = await engine(self._remember())
+        assert "[memory] auto_accept" in verdict.reason
 
 
 class TestExecRules:

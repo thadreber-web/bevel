@@ -361,6 +361,15 @@ class PolicyEngine:
                 ),
             )
         if draft.tier is RiskTier.WRITE_OUTSIDE:
+            if self._memory_auto_accepts(draft.name):
+                return self._allow(
+                    draft,
+                    rule="config:memory:auto_accept",
+                    reason=(
+                        f"{draft.name} writes outside the workspace, but you set "
+                        "[memory] auto_accept = true so it runs unasked"
+                    ),
+                )
             return await self._ask(
                 draft,
                 rule="tier:write_outside",
@@ -377,6 +386,18 @@ class PolicyEngine:
             rule="tier:write_workspace",
             reason=f"writing with {draft.name} needs your approval",
         )
+
+    def _memory_auto_accepts(self, name: str) -> bool:
+        """Whether ``[memory] auto_accept`` covers this tool.
+
+        Three conditions, all of which matter. The store has to be attached, so
+        a run with memory switched off cannot inherit the exemption. The config
+        key has to be on. And the tool has to be ``remember`` by name -- the key
+        was written for one tool, and a second ``WRITE_OUTSIDE`` tool appearing
+        later must not be swept into it.
+        """
+        store = self.ctx.memory
+        return store is not None and store.config.auto_accept and name == "remember"
 
     def _outside(self, paths: tuple[str, ...]) -> tuple[str, ...]:
         """The paths that escape the jail, as the caller wrote them."""

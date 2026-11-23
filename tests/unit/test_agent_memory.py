@@ -14,12 +14,12 @@ from typing import Any
 
 import pytest
 
-from bevel.config.schema import MemoryConfig
+from bevel.config.schema import MemoryConfig, PolicyConfig
 from bevel.core.agent import Agent
 from bevel.core.memory.store import MemoryStore, MemoryType, repo_scope
 from bevel.core.policy import allow_all_policy
 from bevel.providers.base import Capabilities
-from bevel.providers.mock import MockProvider, ScriptedTurn
+from bevel.providers.mock import MockProvider, ScriptedTurn, tool_call
 
 #: Shared by the query and the memory, so FTS5 matches; the other memory shares
 #: no words with either and must stay out.
@@ -167,3 +167,54 @@ async def test_vectors_opt_out_leaves_the_embedder_alone(tmp_path: Path) -> None
 
     await _agent(tmp_path, provider, store).run(QUERY)
     assert store.embedder is None
+
+
+# ---------------------------------------------------------------- wiring
+
+
+def _remember_turn() -> list[ScriptedTurn]:
+    call = tool_call("c1", "remember", {"content": MATCHED, "type": "fact"})
+    return [ScriptedTurn(content="", tool_calls=(call,)), ScriptedTurn(content="done")]
+
+
+def _policy_config(tmp_path: Path) -> PolicyConfig:
+    """Keep the decision log out of the user's real ``~/.cache/bevel``."""
+    return PolicyConfig(db_path=tmp_path / "policy.db")
+
+
+async def test_auto_accept_reaches_the_engine_through_the_agent(tmp_path: Path) -> None:
+    """The config key has to survive the trip from ``Agent`` to the engine.
+
+    The engine tests construct a :class:`PolicyEngine` directly, so they prove
+    the rule but not the plumbing. ``Agent`` builds its own engine from the
+    :class:`ToolContext` it also builds, and the flag is read off the store on
+    that context -- so a wiring slip (the store never reaching the context, or
+    the engine getting a different one) would leave every save asking, with all
+    the engine tests still green. Asserted on the database rather than on a
+    mock: the row landing is the only thing the user actually cares about.
+    """
+    store = _store(tmp_path, enabled=True, auto_accept=True)
+    provider = MockProvider(turns=_remember_turn())
+    agent = Agent(provider, tmp_path, memory=store, policy_config=_policy_config(tmp_path))
+
+    result = await agent.run("save that")
+
+    assert result.ok
+    assert store.list_memories(), "auto_accept was configured and the memory still never landed"
+
+
+async def test_without_auto_accept_the_agent_still_asks(tmp_path: Path) -> None:
+    """The mirror image: the default must not quietly become the opt-in.
+
+    ``DenyAllApprover`` is the engine's own default, so an unattended run where
+    nobody answered is exactly a refusal. If the flag leaked -- read off the
+    wrong config, or defaulted true somewhere -- the memory would land here too.
+    """
+    store = _store(tmp_path, enabled=True)
+    provider = MockProvider(turns=_remember_turn())
+    agent = Agent(provider, tmp_path, memory=store, policy_config=_policy_config(tmp_path))
+
+    result = await agent.run("save that")
+
+    assert result.ok, "a refused tool call must still end the run cleanly"
+    assert not store.list_memories(), "a memory was saved with no one approving it"

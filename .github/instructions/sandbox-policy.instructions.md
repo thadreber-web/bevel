@@ -44,6 +44,8 @@ Seven tiers, and the behaviour is fixed by the tier — don't invent new semanti
 
 `READ` free · `WRITE_WORKSPACE` ask (auto in auto mode) · `WRITE_OUTSIDE` always ask · `EXEC_SAFE` free once allowlisted · `EXEC_UNSAFE` ask · `EXEC_DESTRUCTIVE` always ask + typed confirmation · `NETWORK_EGRESS` ask.
 
+The one exception to `WRITE_OUTSIDE` always-ask is `[memory] auto_accept = true`, which exempts the `remember` tool by name. It is not a general bypass and must not become one: it is read off the `MemoryStore` on the `ToolContext`, so a run with memory off cannot inherit it; it matches `remember` alone, so a second `WRITE_OUTSIDE` tool still asks; and it is checked *after* the path jail, so a call with an escaping path still asks. It exists because learned rules are keyed on argv and `remember` has none, so `a` at the prompt has nothing to learn. Do not extend it to other tools, and do not make it the default.
+
 - Every decision is logged with **the rule that produced it**. "allowed" without a reason is a bug.
 - Learned allowlist entries persist to `policy.db` with a timestamp and a hash. A learned rule must be inspectable and revocable.
 - `EXEC_DESTRUCTIVE` requires *typed* confirmation, not a yes/no keypress.

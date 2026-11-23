@@ -58,6 +58,17 @@ class MemoryConfig:
     enabled: bool = False
     #: Ask the endpoint for embeddings and re-rank candidates by cosine.
     vectors: bool = False
+    #: Skip the approval that ``remember`` would otherwise raise on every save.
+    #:
+    #: ``remember`` is ``WRITE_OUTSIDE``, and that tier means always-ask -- it
+    #: asks even in ``auto`` mode, which is correct for a write outside the
+    #: workspace that is never deleted. But the model initiates those writes
+    #: itself, and learned rules cannot cover it because they are keyed on argv
+    #: and ``remember`` has none, so there is no way to teach the engine to
+    #: expect them. This key is that way, and it is deliberately narrow: one
+    #: tool name, off by default, and it does not reach a path that escapes the
+    #: workspace jail.
+    auto_accept: bool = False
     #: Memories handed back from one recall.
     limit: int = 8
     #: Hard ceiling on the injected block, counted in tokens, not characters.

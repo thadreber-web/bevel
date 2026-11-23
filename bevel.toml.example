@@ -132,6 +132,16 @@ model = "Qwen2.5-Coder-32B-Instruct"
 # vectors = false
 # limit = 8                 # memories handed back per recall
 # max_injection_tokens = 600  # hard ceiling on the injected block, in tokens
+# auto_accept = false       # save memories without asking each time
+#
+# `auto_accept` is the one exception to `remember`'s always-ask tier. Leave it
+# off unless the approval prompt is the reason you are not saving memories:
+# `remember` writes into a file nothing can undo, and the model decides when to
+# call it. It exempts `remember` alone -- any other out-of-workspace write still
+# asks -- and it cannot exempt a call whose path escapes the workspace. Every
+# unasked save is recorded in the policy decision log as
+# `config:memory:auto_accept`, in ~/.cache/bevel/policy.db. There is no
+# `bevel policy` command to read it yet; the table is `decisions`.
 
 # ---------------------------------------------------------------------------
 # Alternative: no file at all

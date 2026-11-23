@@ -490,7 +490,19 @@ class TestMemoryTable:
         assert memory.enabled is True
         assert memory.limit == 3
 
-    @pytest.mark.parametrize("key", ["enabled", "vectors"])
+    def test_auto_accept_defaults_to_off(self, cwd: Path) -> None:
+        """Skipping the ``WRITE_OUTSIDE`` approval has to be an explicit choice."""
+        write(cwd / PROJECT_FILENAME, f"{MINIMAL}\n[memory]\nenabled = true\n")
+        assert load(cwd=cwd, env={}).memory.auto_accept is False
+
+    def test_auto_accept_can_be_turned_on(self, cwd: Path) -> None:
+        write(
+            cwd / PROJECT_FILENAME,
+            f"{MINIMAL}\n[memory]\nenabled = true\nauto_accept = true\n",
+        )
+        assert load(cwd=cwd, env={}).memory.auto_accept is True
+
+    @pytest.mark.parametrize("key", ["enabled", "vectors", "auto_accept"])
     def test_boolean_keys_reject_non_booleans(self, cwd: Path, key: str) -> None:
         write(cwd / PROJECT_FILENAME, f"{MINIMAL}\n[memory]\n{key} = 'yes'\n")
         with pytest.raises(ConfigError, match=rf"\[memory\].*{key} must be a boolean"):

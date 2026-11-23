@@ -46,7 +46,7 @@ MEMORY_DB_FILENAME = "memories.db"
 _POLICY_KEYS = frozenset({"mode", "db_path", "allow", "deny"})
 _POLICY_MODES = tuple(mode.value for mode in PolicyMode)
 
-_MEMORY_KEYS = frozenset({"enabled", "vectors", "limit", "max_injection_tokens"})
+_MEMORY_KEYS = frozenset({"enabled", "vectors", "auto_accept", "limit", "max_injection_tokens"})
 
 _PROFILE_KEYS = frozenset(
     {
@@ -282,7 +282,7 @@ def _merge_memory(target: dict[str, Any], data: dict[str, Any], path: Path) -> N
             f"{path}: [memory] has unknown key(s) {', '.join(sorted(unknown))}; "
             f"expected one of {', '.join(sorted(_MEMORY_KEYS))}"
         )
-    for key in ("enabled", "vectors"):
+    for key in ("enabled", "vectors", "auto_accept"):
         if key in section:
             if not isinstance(section[key], bool):
                 raise ConfigError(f"{path}: [memory] {key} must be a boolean")
