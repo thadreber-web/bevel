@@ -27,6 +27,7 @@ from bevel.config.schema import (
     DEFAULT_TIMEOUT,
     Config,
     ConfigError,
+    MemoryConfig,
     PolicyConfig,
     PolicyMode,
     ProfileConfig,
@@ -40,9 +41,12 @@ PROJECT_FILENAME = "bevel.toml"
 CAPABILITY_CACHE_FILENAME = "capabilities.json"
 POLICY_DB_FILENAME = "policy.db"
 SESSION_DB_FILENAME = "sessions.db"
+MEMORY_DB_FILENAME = "memories.db"
 
 _POLICY_KEYS = frozenset({"mode", "db_path", "allow", "deny"})
 _POLICY_MODES = tuple(mode.value for mode in PolicyMode)
+
+_MEMORY_KEYS = frozenset({"enabled", "vectors", "limit", "max_injection_tokens"})
 
 _PROFILE_KEYS = frozenset(
     {
@@ -83,7 +87,7 @@ def policy_db_path() -> Path:
 
 
 def data_home() -> Path:
-    """``~/.local/share/bevel`` -- holds the session database.
+    """``~/.local/share/bevel`` -- holds the session and memory databases.
 
     Same reasoning as :func:`config_home`: one documented path on every
     platform, correct on Windows too, where it is simply a directory under the
@@ -95,6 +99,16 @@ def data_home() -> Path:
 def session_db_path() -> Path:
     """``~/.local/share/bevel/sessions.db`` -- transcripts and token accounting."""
     return data_home() / SESSION_DB_FILENAME
+
+
+def memory_db_path() -> Path:
+    """``~/.local/share/bevel/memories.db`` -- what bevel learned in past sessions.
+
+    Deliberately outside any workspace: a memory is about the user and their
+    projects, not about one checkout, and it survives a branch deletion. That
+    is also why the ``remember`` tool is ``WRITE_OUTSIDE`` on the risk ladder.
+    """
+    return data_home() / MEMORY_DB_FILENAME
 
 
 def candidate_files(
@@ -137,6 +151,7 @@ def load(
     sources: list[Path] = []
 
     policy_raw: dict[str, Any] = {}
+    memory_raw: dict[str, Any] = {}
     for path in candidate_files(cwd, explicit=explicit_file, env=environ):
         if not path.is_file():
             continue
@@ -147,6 +162,7 @@ def load(
         sources.append(path)
         _merge_profiles(profiles, data, path)
         _merge_policy(policy_raw, data, path)
+        _merge_memory(memory_raw, data, path)
 
     _apply_env(profiles, environ)
 
@@ -164,6 +180,7 @@ def load(
         default_profile=default,
         sources=tuple(sources),
         policy=_build_policy(policy_raw),
+        memory=_build_memory(memory_raw),
     )
 
 
@@ -244,6 +261,48 @@ def _build_policy(raw: dict[str, Any]) -> PolicyConfig:
         allow=raw.get("allow", ()),
         deny=raw.get("deny", ()),
     )
+
+
+def _merge_memory(target: dict[str, Any], data: dict[str, Any], path: Path) -> None:
+    """Fold one file's ``[memory]`` table into ``target``, validating as it goes.
+
+    Validated per file so the error names the file with the mistake, exactly as
+    :func:`_merge_policy` does. ``enabled`` gates the whole feature, so a
+    project ``bevel.toml`` turning it on is a decision the user made in that
+    file and can point at.
+    """
+    section = data.get("memory")
+    if section is None:
+        return
+    if not isinstance(section, dict):
+        raise ConfigError(f"{path}: [memory] must be a table")
+    unknown = set(section) - _MEMORY_KEYS
+    if unknown:
+        raise ConfigError(
+            f"{path}: [memory] has unknown key(s) {', '.join(sorted(unknown))}; "
+            f"expected one of {', '.join(sorted(_MEMORY_KEYS))}"
+        )
+    for key in ("enabled", "vectors"):
+        if key in section:
+            if not isinstance(section[key], bool):
+                raise ConfigError(f"{path}: [memory] {key} must be a boolean")
+            target[key] = section[key]
+    for key in ("limit", "max_injection_tokens"):
+        if key not in section:
+            continue
+        value = section[key]
+        if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+            raise ConfigError(f"{path}: [memory] {key} must be a positive integer")
+        target[key] = value
+
+
+def _build_memory(raw: dict[str, Any]) -> MemoryConfig:
+    """Build from the merged table. ``_merge_memory`` validated every key already.
+
+    Passing the dict through rather than restating each default means
+    :class:`MemoryConfig` is the only place the defaults are written.
+    """
+    return MemoryConfig(**raw)
 
 
 def _apply_env(profiles: dict[str, dict[str, Any]], env: dict[str, str]) -> None:
@@ -383,6 +442,7 @@ __all__ = [
     "config_home",
     "data_home",
     "load",
+    "memory_db_path",
     "policy_db_path",
     "session_db_path",
 ]

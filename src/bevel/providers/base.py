@@ -223,6 +223,17 @@ class ModelProvider(Protocol):
         """Return an exact count, or ``TokenCount(None)``. Never an estimate."""
         ...
 
+    async def embed(self, text: str) -> tuple[float, ...]:
+        """Embedding for ``text`` from ``/embeddings``.
+
+        Raises :class:`ProviderError` when the endpoint does not serve the
+        route. There is no fallback vector: a zero or a guess would turn every
+        cosine into a confident wrong answer, and recall would look like it
+        worked. Callers check ``capabilities.supports_embeddings`` first and
+        degrade to lexical recall when the answer is no.
+        """
+        ...
+
     async def health(self) -> Health:
         """Cheap liveness probe. Must not generate tokens."""
         ...

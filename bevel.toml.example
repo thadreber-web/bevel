@@ -112,6 +112,27 @@ model = "Qwen2.5-Coder-32B-Instruct"
 # allow = ["pytest", "ruff check"]
 # deny = ["git push"]
 
+# --- memory ---------------------------------------------------------------
+# Long-term memory: what bevel learned in an earlier session about this repo
+# and about you, kept in ~/.local/share/bevel/memories.db. Off by default --
+# storing memories about someone's codebase is a choice you make, not a
+# default. Nothing is ever deleted; a corrected memory is superseded, and
+# `bevel memories list` counts the superseded rows while `bevel memories show
+# <id>` still reads one.
+#
+# Retrieval is FTS5 + bm25 first. `vectors` additionally asks the endpoint for
+# embeddings and re-ranks the ~100 candidates by cosine, which is worth it
+# only if the server actually serves /embeddings. `bevel doctor` does not tell
+# you -- it only reports sandbox capabilities. Instead, every recall result
+# names the mode it used and why: if the endpoint has no /embeddings route, or
+# the stored vectors came from a different model than the query, recall says so
+# on the result rather than quietly scoring nonsense.
+# [memory]
+# enabled = true
+# vectors = false
+# limit = 8                 # memories handed back per recall
+# max_injection_tokens = 600  # hard ceiling on the injected block, in tokens
+
 # ---------------------------------------------------------------------------
 # Alternative: no file at all
 # ---------------------------------------------------------------------------

@@ -18,6 +18,7 @@ from bevel import __version__
 from bevel.cli import _PENDING, build_parser, main
 from bevel.config import loader
 from bevel.core.checkpoint import snapshot
+from bevel.core.memory.store import MemoryStore, MemoryType
 from bevel.core.messages import Message
 from bevel.core.session import store as session_store
 from bevel.core.session.store import SessionStore
@@ -148,6 +149,143 @@ class TestSessions:
         main(["sessions"])
         out = capsys.readouterr().out
         assert out.index(second.id) < out.index(first.id)
+
+
+class TestMemories:
+    @pytest.fixture
+    def db(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+        path = tmp_path / "share" / "memories.db"
+        monkeypatch.setattr(loader, "memory_db_path", lambda: path)
+        return path
+
+    def _store(self, path: Path) -> MemoryStore:
+        store = MemoryStore(path)
+        store.add(content="we use uv, not pip", type=MemoryType.DECISION, scope="global")
+        return store
+
+    def test_listing_on_a_fresh_machine_creates_no_database(
+        self, db: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        assert main(["memories"]) == 0
+        assert "nothing stored yet" in capsys.readouterr().out
+        assert not db.exists(), "listing memories must not create a database"
+
+    def test_list_shows_the_columns_needed_to_act_on_a_row(
+        self, db: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        store = self._store(db)
+        store.close()
+        assert main(["memories", "list"]) == 0
+        out = capsys.readouterr().out
+        for column in ("id", "type", "created", "scope", "content"):
+            assert column in out
+        assert "we use uv, not pip" in out
+        assert "decision" in out
+        assert str(db) in out
+
+    def test_a_superseded_memory_is_hidden_from_list_but_still_readable(
+        self, db: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        store = self._store(db)
+        old = store.list_memories()[0].id
+        store.add(
+            content="we use uv, and pip is fine too", type=MemoryType.DECISION, scope="global"
+        )
+        new = store.list_memories()[0].id
+        store.supersede(old, by=new)
+        store.close()
+
+        assert main(["memories", "list"]) == 0
+        out = capsys.readouterr().out
+        assert "we use uv, not pip" not in out
+        assert "superseded" in out
+
+        assert main(["memories", "show", str(old)]) == 0
+        shown = capsys.readouterr().out
+        assert "we use uv, not pip" in shown
+        assert f"superseded by #{new}" in shown
+
+    def test_show_reports_the_vector_and_its_model(
+        self, db: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        store = MemoryStore(db)
+        store.add(
+            content="the release is tagged from main",
+            type=MemoryType.FACT,
+            scope="global",
+            vector=(1.0, 0.0),
+            vector_model="bge-m3",
+        )
+        memory_id = store.list_memories()[0].id
+        store.close()
+
+        assert main(["memories", "show", str(memory_id)]) == 0
+        out = capsys.readouterr().out
+        assert "bge-m3" in out
+        assert "the release is tagged from main" in out
+
+    def test_supersede_links_the_two_rows(
+        self, db: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        store = self._store(db)
+        old = store.list_memories()[0].id
+        store.add(content="uv and pip both work", type=MemoryType.DECISION, scope="global")
+        new = store.list_memories()[0].id
+        store.close()
+
+        assert main(["memories", "supersede", str(old), str(new)]) == 0
+        assert f"#{old} is superseded by #{new}" in capsys.readouterr().out
+
+        store = MemoryStore(db)
+        try:
+            assert store.get(old) is not None, "supersede deleted the row"
+            assert store.get(old).superseded_by == new  # type: ignore[union-attr]
+        finally:
+            store.close()
+
+    def test_superseding_twice_fails_loudly(
+        self, db: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        store = self._store(db)
+        old = store.list_memories()[0].id
+        replacement = store.add(content="a later belief", type=MemoryType.FACT, scope="global").id
+        store.close()
+
+        assert main(["memories", "supersede", str(old), str(replacement)]) == 0
+        capsys.readouterr()
+        assert main(["memories", "supersede", str(old), str(replacement)]) == 2
+        assert "already superseded" in capsys.readouterr().err
+
+    def test_an_unknown_id_is_a_failure_not_an_empty_success(
+        self, db: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        self._store(db).close()
+        assert main(["memories", "show", "9999"]) == 2
+        assert "no memory with id 9999" in capsys.readouterr().err
+
+    def test_a_non_numeric_id_is_rejected(
+        self, db: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        self._store(db).close()
+        assert main(["memories", "show", "abc"]) == 2
+        assert "not a memory id" in capsys.readouterr().err
+
+    def test_supersede_without_two_ids_is_a_usage_error(
+        self, db: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        self._store(db).close()
+        assert main(["memories", "supersede", "1"]) == 2
+        assert "<old-id> <new-id>" in capsys.readouterr().err
+
+    def test_an_unimplemented_action_is_rejected_by_the_parser(
+        self, db: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """No delete exists, and `bevel memories delete` must not look like it does."""
+        with pytest.raises(SystemExit) as excinfo:
+            main(["memories", "delete", "1"])
+        assert excinfo.value.code == 2
+        assert "invalid choice" in capsys.readouterr().err
+        assert not db.exists(), "a rejected action must not create a database"
 
 
 class TestResume:

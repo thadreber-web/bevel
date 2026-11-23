@@ -19,18 +19,24 @@ from typing import IO
 from . import __version__
 from ._capability import CapabilityReport, probe
 from .core.checkpoint import restore
+from .core.memory.store import MemoryStore
 from .core.session.store import SessionStore
 
 #: Subcommands that are planned but not built yet, mapped to the milestone
 #: that delivers them. Kept in one place so ``--help`` and the stub message
 #: cannot drift apart.
 _PENDING: dict[str, str] = {
-    "memory": "m09 (long-term memory)",
     "mcp": "m10 (MCP client)",
     "pr": "m11 (git and PR operations)",
     "sandbox": "m12 (sandbox backends)",
     "eval": "m13 (eval harness)",
 }
+
+#: What ``bevel memories`` accepts. All three are built, so anything else is a
+#: usage error argparse rejects with exit 2 rather than a stub that pretends.
+#: There is no ``delete`` and none is planned: a wrong memory is superseded, so
+#: the chain of what bevel believed stays readable.
+_MEMORY_ACTIONS: tuple[str, ...] = ("list", "show", "supersede")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -49,6 +55,11 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser("doctor", help="report environment, endpoints and sandbox capability")
     subparsers.add_parser("undo", help="rewind the working tree to the last checkpoint")
     subparsers.add_parser("sessions", help="list recent sessions")
+    memories = subparsers.add_parser("memories", help="inspect and correct long-term memory")
+    # Positionals only. A `--flag` here would have to be read by this milestone,
+    # and TestParser rejects an option the current code does not act on.
+    memories.add_argument("action", nargs="?", choices=_MEMORY_ACTIONS, help="what to do")
+    memories.add_argument("args", nargs="*", metavar="ARG", help="memory id(s) the action needs")
     resume = subparsers.add_parser("resume", help="reopen a session and continue it")
     resume.add_argument(
         "session",
@@ -153,6 +164,97 @@ def _sessions(out: IO[str]) -> int:
         store.close()
 
 
+def _memory_id(raw: str, err: IO[str]) -> int | None:
+    try:
+        return int(raw)
+    except ValueError:
+        err.write(
+            f"bevel memories: {raw!r} is not a memory id. Ids are the numbers in the first column.\n"
+        )
+        return None
+
+
+def _memories(  # noqa: PLR0911 - one exit per argument shape; a dispatcher reads better than nesting
+    action: str | None, args: Sequence[str], out: IO[str], err: IO[str]
+) -> int:
+    """List, read, and correct what bevel has stored.
+
+    Reads never create the database, so the command on a fresh machine leaves
+    nothing behind. There is no delete: a wrong memory is superseded, which
+    keeps the chain auditable, and ``show`` can still read what was replaced.
+    """
+    from .config.loader import memory_db_path  # noqa: PLC0415
+
+    store = MemoryStore(memory_db_path())
+    try:
+        if not store.db_path.exists():
+            out.write(f"bevel memories: nothing stored yet ({store.db_path}).\n")
+            return 0
+        if action in (None, "list"):
+            return _memories_list(store, out)
+        if action == "show":
+            if len(args) != 1:
+                err.write("bevel memories show: expected exactly one memory id.\n")
+                return 2
+            memory_id = _memory_id(args[0], err)
+            return 2 if memory_id is None else _memories_show(store, memory_id, out, err)
+        if len(args) != 2:
+            err.write("bevel memories supersede: expected <old-id> <new-id>.\n")
+            return 2
+        old = _memory_id(args[0], err)
+        new = _memory_id(args[1], err)
+        if old is None or new is None:
+            return 2
+        return _memories_supersede(store, old, new, out, err)
+    finally:
+        store.close()
+
+
+def _memories_list(store: MemoryStore, out: IO[str]) -> int:
+    rows = store.list_memories()
+    if not rows:
+        total = len(store.list_memories(include_superseded=True))
+        out.write(
+            f"bevel memories: no active memories. {total} superseded row(s) remain in "
+            f"{store.db_path}; read one with 'bevel memories show <id>'.\n"
+        )
+        return 0
+    out.write(f"{'id':>6}  {'type':<9}{'created':<17}{'scope':<34}content\n")
+    for row in rows:
+        content = row.content if len(row.content) <= 72 else f"{row.content[:71]}..."
+        out.write(
+            f"{row.id:>6}  {row.type!s:<9}{_stamp(row.created_at):<17}{row.scope:<34}{content}\n"
+        )
+    hidden = len(store.list_memories(include_superseded=True)) - len(rows)
+    note = f", {hidden} superseded" if hidden else ""
+    out.write(f"\n  {len(rows)} active memory(ies){note} in {store.db_path}\n")
+    return 0
+
+
+def _memories_show(store: MemoryStore, memory_id: int, out: IO[str], err: IO[str]) -> int:
+    row = store.get(memory_id)
+    if row is None:
+        err.write(f"bevel memories show: no memory with id {memory_id}.\n")
+        return 2
+    out.write(f"#{row.id}  {_stamp(row.created_at)}  [{row.type}]  {row.scope}\n")
+    out.write(f"  {row.content}\n")
+    if row.vector_model is not None:
+        out.write(f"  vector: {row.vector_model}\n")
+    if row.superseded_by is not None:
+        out.write(f"  superseded by #{row.superseded_by}\n")
+    return 0
+
+
+def _memories_supersede(store: MemoryStore, old: int, new: int, out: IO[str], err: IO[str]) -> int:
+    try:
+        store.supersede(old, by=new)
+    except ValueError as exc:
+        err.write(f"bevel memories supersede: {exc}\n")
+        return 2
+    out.write(f"bevel memories: #{old} is superseded by #{new}. #{old} is no longer recalled.\n")
+    return 0
+
+
 def _resume(named: str | None) -> int:
     """Reopen a session in the TUI: a named one, or the most recent for here."""
     from .config.loader import session_db_path  # noqa: PLC0415
@@ -185,7 +287,7 @@ def _resume(named: str | None) -> int:
     return run_tui(resume=session_id)
 
 
-def main(argv: Sequence[str] | None = None) -> int:
+def main(argv: Sequence[str] | None = None) -> int:  # noqa: PLR0911 - one exit per subcommand
     """Entry point. Returns a process exit code; never calls ``sys.exit``."""
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -199,6 +301,9 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if args.command == "sessions":
         return _sessions(sys.stdout)
+
+    if args.command == "memories":
+        return _memories(args.action, args.args, sys.stdout, sys.stderr)
 
     if args.command == "resume":
         return _resume(args.session)

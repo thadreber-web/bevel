@@ -25,6 +25,7 @@ from bevel.config.schema import (
     DEFAULT_CONNECT_TIMEOUT,
     DEFAULT_TIMEOUT,
     ConfigError,
+    MemoryConfig,
 )
 
 MINIMAL = """
@@ -453,3 +454,70 @@ class TestPaths:
         monkeypatch.setattr(Path, "cwd", classmethod(lambda _cls: Path("/nowhere")))
         files = candidate_files(None)
         assert files[1] == Path("/nowhere") / PROJECT_FILENAME
+
+    def test_memory_db_path_is_under_the_data_home(self) -> None:
+        assert loader.memory_db_path().name == loader.MEMORY_DB_FILENAME
+        assert loader.memory_db_path().parent == loader.data_home()
+
+
+class TestMemoryTable:
+    """The ``[memory]`` table: off by default, validated per file, layered key by key."""
+
+    def test_memory_is_off_when_no_table_is_present(self, cwd: Path) -> None:
+        write(cwd / PROJECT_FILENAME, MINIMAL)
+        memory = load(cwd=cwd, env={}).memory
+        assert memory.enabled is False
+        assert memory.vectors is False
+
+    def test_a_table_turns_the_feature_on(self, cwd: Path) -> None:
+        write(cwd / PROJECT_FILENAME, f"{MINIMAL}\n[memory]\nenabled = true\n")
+        assert load(cwd=cwd, env={}).memory.enabled is True
+
+    def test_defaults_come_from_the_schema_not_a_restated_copy(self, cwd: Path) -> None:
+        """Only the keys the file sets are overridden; the rest stay at their defaults."""
+        write(cwd / PROJECT_FILENAME, f"{MINIMAL}\n[memory]\nenabled = true\n")
+        memory = load(cwd=cwd, env={}).memory
+        assert memory.limit == MemoryConfig().limit
+        assert memory.max_injection_tokens == MemoryConfig().max_injection_tokens
+
+    def test_project_file_overrides_only_the_keys_it_sets(self, cwd: Path) -> None:
+        write(
+            loader.config_home() / "config.toml",
+            f"{MINIMAL}\n[memory]\nenabled = true\nlimit = 12\n",
+        )
+        write(cwd / PROJECT_FILENAME, "[memory]\nlimit = 3\n")
+        memory = load(cwd=cwd, env={}).memory
+        assert memory.enabled is True
+        assert memory.limit == 3
+
+    @pytest.mark.parametrize("key", ["enabled", "vectors"])
+    def test_boolean_keys_reject_non_booleans(self, cwd: Path, key: str) -> None:
+        write(cwd / PROJECT_FILENAME, f"{MINIMAL}\n[memory]\n{key} = 'yes'\n")
+        with pytest.raises(ConfigError, match=rf"\[memory\].*{key} must be a boolean"):
+            load(cwd=cwd, env={})
+
+    @pytest.mark.parametrize("key", ["limit", "max_injection_tokens"])
+    @pytest.mark.parametrize("value", ["0", "-1", "'8'", "1.5", "true"])
+    def test_integer_keys_reject_non_positive_integers(
+        self, cwd: Path, key: str, value: str
+    ) -> None:
+        """``true`` is rejected too: TOML booleans are Python ints, and a flag is not a budget."""
+        write(cwd / PROJECT_FILENAME, f"{MINIMAL}\n[memory]\n{key} = {value}\n")
+        with pytest.raises(ConfigError, match=rf"\[memory\].*{key} must be a positive integer"):
+            load(cwd=cwd, env={})
+
+    def test_unknown_keys_are_rejected_with_the_expected_list(self, cwd: Path) -> None:
+        write(cwd / PROJECT_FILENAME, f"{MINIMAL}\n[memory]\nenableda = true\n")
+        with pytest.raises(ConfigError, match=r"unknown key\(s\).*enableda"):
+            load(cwd=cwd, env={})
+
+    def test_unknown_key_error_names_the_file(self, cwd: Path) -> None:
+        path = write(cwd / PROJECT_FILENAME, f"{MINIMAL}\n[memory]\nnonsense = 1\n")
+        with pytest.raises(ConfigError, match=re.escape(str(path))):
+            load(cwd=cwd, env={})
+
+    def test_memory_section_must_be_a_table(self, cwd: Path) -> None:
+        """Written before the profile table, or TOML would nest it inside the profile."""
+        write(cwd / PROJECT_FILENAME, f"memory = 'nope'\n{MINIMAL}")
+        with pytest.raises(ConfigError, match=r"\[memory\] must be a table"):
+            load(cwd=cwd, env={})

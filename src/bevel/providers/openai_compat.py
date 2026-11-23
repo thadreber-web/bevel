@@ -35,6 +35,7 @@ from bevel.providers.base import (
     GenOptions,
     Health,
     MalformedResponseError,
+    ProviderError,
     StreamEvent,
     TokenCount,
     TransportError,
@@ -315,6 +316,32 @@ class OpenAICompatProvider:
                 "/tokenize response had no integer count", body=response.text
             )
         return TokenCount(count, source="server /tokenize")
+
+    async def embed(self, text: str) -> tuple[float, ...]:
+        """One embedding from ``POST /embeddings``.
+
+        Raises rather than guessing. A gateway that does not proxy the route
+        answers 404, and returning a zero vector there would make every cosine
+        zero and every ranking a confident lie -- so the caller degrades to
+        lexical recall instead, and says so.
+        """
+        if not self.capabilities.supports_embeddings:
+            raise ProviderError(f"{self.name}: endpoint has no /embeddings route")
+        try:
+            response = await self._post_json("/embeddings", {"model": self.model, "input": text})
+        except APIError as exc:
+            if exc.status == 404:
+                raise ProviderError(f"{self.name}: endpoint has no /embeddings route") from exc
+            raise
+        payload = _json_or_raise(response, "/embeddings")
+        data = payload.get("data") if isinstance(payload, dict) else None
+        first = data[0] if isinstance(data, list) and data else None
+        values = first.get("embedding") if isinstance(first, dict) else None
+        if not isinstance(values, list) or not all(isinstance(v, (int, float)) for v in values):
+            raise MalformedResponseError(
+                "/embeddings response had no numeric data[0].embedding", body=response.text
+            )
+        return tuple(float(v) for v in values)
 
     async def health(self) -> Health:
         """Liveness via ``GET /models``.

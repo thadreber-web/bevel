@@ -1,10 +1,10 @@
 """Tests for the tool registry.
 
 ``core/tools/types.py`` names this module as the single source of truth for the
-tool list the model is offered, so these tests hold it to that: the six m03
-tools are all present, nothing is offered twice, and every declared schema is
-one the hand-rolled validator actually understands -- a typo in a keyword would
-otherwise silently disable argument checking.
+tool list the model is offered, so these tests hold it to that: every tool is
+present exactly once, and every declared schema is one the hand-rolled validator
+actually understands -- a typo in a keyword would otherwise silently disable
+argument checking.
 """
 
 from __future__ import annotations
@@ -16,13 +16,16 @@ from bevel.core.tools import registry
 from bevel.core.tools.base import RiskTier, Tool, ToolContext, call_tool
 from bevel.core.tools.schema import unsupported_keywords
 
-M03_TOOLS = ["read", "grep", "glob", "write", "edit", "shell"]
+# The six m03 tools, plus the two memory tools m09a adds. Recall sits with the
+# other read-only tools and remember with the writers, so the order the model
+# sees groups by what a tool does to the world.
+OFFERED_TOOLS = ["read", "grep", "glob", "recall", "write", "edit", "remember", "shell"]
 NAME_RE = re.compile(r"^[a-z][a-z0-9_]*$")
 
 
 class TestToolList:
-    def test_the_six_m03_tools_are_offered(self) -> None:
-        assert [tool.spec.name for tool in registry.tools()] == M03_TOOLS
+    def test_the_offered_tools_are_exactly_the_expected_ones(self) -> None:
+        assert [tool.spec.name for tool in registry.tools()] == OFFERED_TOOLS
 
     def test_the_list_is_stable_across_calls(self) -> None:
         assert [tool.spec.name for tool in registry.tools()] == [
@@ -52,10 +55,24 @@ class TestToolList:
             if tool.is_parallel_safe:
                 assert tool.risk_tier is RiskTier.READ, tool.spec.name
 
-    def test_no_tier_without_an_m03_producer_is_declared(self) -> None:
-        """m05 and m12 own the other tiers; declaring them here would be a lie."""
+    def test_no_tier_without_a_producer_is_declared(self) -> None:
+        """EXEC_SAFE, EXEC_DESTRUCTIVE and NETWORK_EGRESS have no tool yet.
+
+        Those tiers are decided by rules or by the sandbox, not by a tool
+        declaring them, so a tool claiming one would be a lie.
+        """
         declared = {tool.risk_tier for tool in registry.tools()}
-        assert declared == {RiskTier.READ, RiskTier.WRITE_WORKSPACE, RiskTier.EXEC_UNSAFE}
+        assert declared == {
+            RiskTier.READ,
+            RiskTier.WRITE_WORKSPACE,
+            RiskTier.WRITE_OUTSIDE,
+            RiskTier.EXEC_UNSAFE,
+        }
+
+    def test_remember_is_the_only_tool_that_writes_outside_the_workspace(self) -> None:
+        """The memory db lives in ~/.local/share/bevel, so it is not a workspace write."""
+        outside = [t.spec.name for t in registry.tools() if t.risk_tier is RiskTier.WRITE_OUTSIDE]
+        assert outside == ["remember"]
 
 
 class TestSchemas:

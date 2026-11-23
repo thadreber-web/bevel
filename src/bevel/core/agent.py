@@ -67,6 +67,8 @@ from bevel.config.schema import PolicyConfig
 from bevel.core.checkpoint import snapshot
 from bevel.core.context.compact import compact_l1, compact_l2
 from bevel.core.context.project_map import build_project_map
+from bevel.core.memory.recall import memory_block
+from bevel.core.memory.store import MemoryStore
 from bevel.core.messages import Message, ToolCall
 from bevel.core.policy import (
     Approver,
@@ -484,6 +486,7 @@ class Agent:
         summariser: ModelProvider | None = None,
         store: SessionStore | None = None,
         resume: ResumedSession | None = None,
+        memory: MemoryStore | None = None,
     ) -> None:
         if budgets.max_iterations < 1:
             raise ValueError("max_iterations must be at least 1")
@@ -492,7 +495,13 @@ class Agent:
         if concurrency < 1:
             raise ValueError("concurrency must be at least 1")
         self.provider = provider
-        self.ctx = ToolContext(Path(workspace))
+        self._memory = memory
+        if memory is not None and memory.config.vectors and memory.embedder is None:
+            # The store outlives the run, but only the run knows what endpoint is
+            # talking to it. Recall refuses to compare vectors across models, so
+            # tagging them with *this* provider is what makes them comparable.
+            memory.embedder = provider
+        self.ctx = ToolContext(Path(workspace), memory)
         self.system = system
         self.options = options
         self.budgets = budgets
@@ -653,17 +662,44 @@ class Agent:
         The system prompt carries a freshly built project map rather than a
         stored one, so a resumed session never inherits a stale picture of the
         tree. What *is* taken from the store is the conversation itself.
+
+        Recalled memory goes at **index 1**, in its own message. It cannot be
+        merged into the system prompt and cannot be ``messages[0]``, because
+        :mod:`bevel.core.context.compact` never evicts ``messages[0]`` and a
+        stale memory block has to be evictable.
         """
         # The walk is bounded but real disk I/O, and it happens while the TUI is
         # live, so it goes off the event loop.
         project_map = await asyncio.to_thread(build_project_map, self.ctx.workspace)
         state.messages.append(Message.system(f"{self.system}\n\n{project_map}"))
+        block = await self._recall_block(task)
+        if block is not None:
+            state.messages.insert(1, block)
         if self._resumed is not None:
             state.messages.extend(self._resumed.messages)
         task_message = Message.user(task)
         state.messages.append(task_message)
         self._open_session()
         self._persist(task_message)
+
+    async def _recall_block(self, task: str) -> Message | None:
+        """The recalled-memory message, or ``None`` when there is nothing to inject.
+
+        Runs off the loop for the same reason the project map does. A memory
+        failure is never allowed to fail the run: the user asked for their task,
+        not for their memory database, so it is logged and the run continues
+        without the block.
+        """
+        if self._memory is None:
+            return None
+        try:
+            block = await memory_block(self._memory, self.provider, query=task)
+        except Exception:
+            # Memory is an enhancement, not a dependency: a broken store must
+            # not cost the user the task they actually asked for.
+            logger.exception("recall for the opening context failed; continuing without it")
+            return None
+        return block.message
 
     def _budget_stop(self, state: _RunState, totals: _Totals) -> tuple[StopReason, str] | None:
         """Why the next iteration must not start, or ``None`` to continue.

@@ -20,10 +20,13 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
-from typing import Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from bevel.core.tools.schema import validate
 from bevel.core.tools.types import ToolSpec
+
+if TYPE_CHECKING:
+    from bevel.core.memory.store import MemoryStore
 
 
 class RiskTier(StrEnum):
@@ -52,12 +55,13 @@ class RiskTier(StrEnum):
     | ``NETWORK_EGRESS``        | ask                                      |
     +---------------------------+------------------------------------------+
 
-    The m03 tools produce ``READ``, ``WRITE_WORKSPACE``, and ``EXEC_UNSAFE``.
+    The m03 tools produce ``READ``, ``WRITE_WORKSPACE``, and ``EXEC_UNSAFE``;
+    m09a's ``remember`` produces ``WRITE_OUTSIDE``, since it writes to the
+    user-level memory database rather than the workspace.
     The rest have no producer yet, deliberately: ``EXEC_SAFE`` and
     ``EXEC_DESTRUCTIVE`` come from matching a *specific* argv against rules
-    (m05), ``WRITE_OUTSIDE`` from a path the user approved (m05), and
-    ``NETWORK_EGRESS`` from the sandbox (m12). A tool cannot claim ``EXEC_SAFE``
-    on its own -- safety is a property of the command, decided by a rule, not of
+    (m05), and ``NETWORK_EGRESS`` from the sandbox (m12). A tool cannot claim
+    ``EXEC_SAFE`` on its own -- safety is a property of the command, decided by a rule, not of
     the tool that runs it. That is why :class:`~bevel.core.tools.shell` declares
     ``EXEC_UNSAFE`` and nothing better.
     """
@@ -116,6 +120,9 @@ class ToolContext:
     """
 
     workspace: Path
+    #: Long-term memory, or ``None`` when it is not configured. Optional and
+    #: last so that every existing ``ToolContext(workspace)`` call is unchanged.
+    memory: MemoryStore | None = None
 
     def __post_init__(self) -> None:
         # Resolving here rather than per call: ``resolve()`` follows symlinks

@@ -22,6 +22,7 @@ from bevel.providers.base import (
     ContentDelta,
     GenOptions,
     Health,
+    ProviderError,
     ReasoningDelta,
     StreamEnd,
     StreamEvent,
@@ -76,6 +77,10 @@ class MockProvider:
     health_detail: str = "mock provider"
     token_count: int | None = None
     delay: float = 0.0
+    #: Scripted ``/embeddings`` answers: text -> vector. Anything not listed is
+    #: refused rather than answered with zeros, which would make every cosine a
+    #: confident lie.
+    embeddings: dict[str, tuple[float, ...]] = field(default_factory=dict)
     requests: list[dict[str, object]] = field(default_factory=list)
     _index: int = 0
 
@@ -141,6 +146,22 @@ class MockProvider:
         if self.token_count is None:
             return TokenCount(None, source="mock has no tokenizer")
         return TokenCount(self.token_count, source="mock")
+
+    async def embed(self, text: str) -> tuple[float, ...]:
+        """Return the scripted vector for ``text``.
+
+        Refuses rather than inventing: a zero vector would silently score every
+        cosine at zero and make a broken test look like a working one.
+        """
+        if not self.capabilities.supports_embeddings:
+            raise ProviderError(f"{self.name}: endpoint has no /embeddings route")
+        try:
+            return self.embeddings[text]
+        except KeyError:
+            available = ", ".join(repr(key) for key in self.embeddings) or "none scripted"
+            raise ProviderError(
+                f"{self.name}: no scripted embedding for {text!r} (scripted: {available})"
+            ) from None
 
     async def health(self) -> Health:
         return Health(self.health_ok, self.health_detail, models=(self.model,))

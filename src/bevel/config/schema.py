@@ -45,6 +45,25 @@ class PolicyConfig:
     deny: tuple[str, ...] = ()
 
 
+@dataclass(frozen=True)
+class MemoryConfig:
+    """The ``[memory]`` section: long-term recall, off unless switched on.
+
+    ``vectors`` is opt-in and has no effect unless the endpoint actually
+    answered a probe of ``/embeddings``. With it off, memory is lexical-only
+    (FTS5 + bm25) and every recall says so rather than implying otherwise.
+    """
+
+    #: Off by default: storing memories about someone's codebase is a choice.
+    enabled: bool = False
+    #: Ask the endpoint for embeddings and re-rank candidates by cosine.
+    vectors: bool = False
+    #: Memories handed back from one recall.
+    limit: int = 8
+    #: Hard ceiling on the injected block, counted in tokens, not characters.
+    max_injection_tokens: int = 600
+
+
 class ConfigError(Exception):
     """Configuration is present but unusable.
 
@@ -101,6 +120,7 @@ class Config:
     #: increasing precedence. Reported by ``bevel doctor``.
     sources: tuple[Path, ...] = ()
     policy: PolicyConfig = field(default_factory=PolicyConfig)
+    memory: MemoryConfig = field(default_factory=MemoryConfig)
 
     def profile(self, name: str | None = None) -> ProfileConfig:
         key = name or self.default_profile
