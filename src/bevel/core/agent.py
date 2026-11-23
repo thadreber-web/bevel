@@ -153,6 +153,24 @@ DEFAULT_SYSTEM_PROMPT: Final[str] = (
     "installed. Say what you need instead of assuming you have it."
 )
 
+#: Appended to the system prompt when a memory store is attached.
+#:
+#: The model discovers ``remember`` from the tool schema on its own -- it called
+#: it unprompted against a real endpoint -- so this is not about teaching it the
+#: tool exists. It is about telling it to *use* it, which the bare schema does
+#: not, and about staying silent when there is no store: the registry offers
+#: ``remember`` and ``recall`` either way, so guidance that ignored the flag
+#: would have the model spend calls on tools that can only fail.
+MEMORY_SYSTEM: Final[str] = (
+    "Long-term memory is on for this run. `recall` retrieves what bevel learned "
+    "in earlier sessions about this project and about you; `remember` saves "
+    "something worth keeping. Recall what is relevant before you start working, "
+    "and save a durable fact, preference, or decision as soon as you learn one "
+    "-- memory only helps a later session if you use it now. Correcting an "
+    "earlier memory means saving the new one and superseding the old. "
+    "`remember` writes outside the workspace, so it may pause for your approval."
+)
+
 #: What L2's summariser is told to do. Kept out of the loop so the one place that
 #: asks for a summary is the one place that says what a summary is for.
 SUMMARY_SYSTEM: Final[str] = (
@@ -671,7 +689,10 @@ class Agent:
         # The walk is bounded but real disk I/O, and it happens while the TUI is
         # live, so it goes off the event loop.
         project_map = await asyncio.to_thread(build_project_map, self.ctx.workspace)
-        state.messages.append(Message.system(f"{self.system}\n\n{project_map}"))
+        system = self.system
+        if self._memory is not None:
+            system = f"{system}\n\n{MEMORY_SYSTEM}"
+        state.messages.append(Message.system(f"{system}\n\n{project_map}"))
         block = await self._recall_block(task)
         if block is not None:
             state.messages.insert(1, block)

@@ -90,8 +90,37 @@ async def test_no_memory_store_leaves_the_transcript_untouched(tmp_path: Path) -
     without = await _agent(tmp_path, provider, None).run(QUERY)
     with_empty = await _agent(tmp_path, provider, _store(tmp_path)).run(QUERY)
 
-    assert [m.content for m in without.messages] == [m.content for m in with_empty.messages]
+    # From index 1 on, an attached-but-empty store must change nothing. The
+    # system message is allowed to differ: it names the memory tools when a
+    # store is attached, which is the point of the store being attached.
+    without_rest = [m.content for m in without.messages[1:]]
+    with_empty_rest = [m.content for m in with_empty.messages[1:]]
+    assert without_rest == with_empty_rest
     assert all("bevel recall" not in m.content for m in without.messages)
+
+
+async def test_the_prompt_names_the_memory_tools_only_when_memory_is_on(
+    tmp_path: Path,
+) -> None:
+    """The model reaches for ``remember`` on its own, so say when it is available.
+
+    Left to the tool descriptions alone the model does discover ``remember`` --
+    it called it unprompted against a real endpoint -- but it discovers it the
+    same way when memory is switched off, and then spends a call on a tool that
+    can only fail. So the guidance rides on the same flag as everything else
+    about memory: a store attached means the prompt mentions the tools, no
+    store means the prompt is the plain one.
+    """
+    provider = MockProvider(turns=[ScriptedTurn(content="hi")])
+    off = await _agent(tmp_path, provider, None).run(QUERY)
+    on = await _agent(tmp_path, provider, _store(tmp_path, MATCHED)).run(QUERY)
+
+    off_prompt = off.messages[0].content.lower()
+    on_prompt = on.messages[0].content.lower()
+    assert "remember" not in off_prompt, "the prompt offers memory tools that cannot be used"
+    assert "recall" not in off_prompt, "the prompt offers memory tools that cannot be used"
+    assert "remember" in on_prompt, "the model is never told it can store a memory"
+    assert "recall" in on_prompt, "the model is never told it can look one up"
 
 
 async def test_a_store_that_matches_nothing_injects_nothing(tmp_path: Path) -> None:
