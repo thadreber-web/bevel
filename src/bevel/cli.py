@@ -59,7 +59,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     subparsers = parser.add_subparsers(dest="command", metavar="COMMAND")
-    subparsers.add_parser("doctor", help="report environment, endpoints and sandbox capability")
+    subparsers.add_parser("doctor", help="report platform, Python and sandbox capability")
     subparsers.add_parser("undo", help="rewind the working tree to the last checkpoint")
     subparsers.add_parser("sessions", help="list recent sessions")
     memories = subparsers.add_parser("memories", help="inspect and correct long-term memory")
@@ -94,7 +94,7 @@ def _render_doctor(report: CapabilityReport) -> str:
         f"  python          {report.python_version}",
         f"  in container    {'yes' if report.in_container else 'no'}",
         f"  best tier       {report.best_tier} "
-        "(0=policy-only, 1=kernel, 2=os-container; verified at runtime by self-test)",
+        "(0=policy-only, 1=kernel, 2=os-container; what your OS could enforce)",
         "",
         "  sandbox capabilities",
     ]
@@ -109,8 +109,9 @@ def _render_doctor(report: CapabilityReport) -> str:
         "  container is disposable while an agent must write real edits. It is",
         "  enabled by config when m12 delivers the container backends.",
         "",
-        "  Static probing only. bevel reports the enforcement level it *verified*,",
-        "  which can be lower than 'best tier' above.",
+        "  Static probing only. No sandbox backend ships yet: bevel enforces the T0",
+        "  policy jail, whatever 'best tier' above says. m12 adds the backends and",
+        "  the self-test that would justify a higher number.",
     ]
     return "\n".join(lines)
 

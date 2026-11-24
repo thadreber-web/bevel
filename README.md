@@ -6,7 +6,9 @@ A terminal coding agent for model servers you already run.
 
 bevel talks to **OpenAI-compatible endpoints only** — [vLLM](https://docs.vllm.ai/) and [llama.cpp](https://github.com/ggml-org/llama.cpp)'s `llama-server`. No API keys, no per-token billing, no code leaving your network.
 
-> **Status: under construction.** The scaffold, capability probing, and `bevel doctor` work today, as do the provider layer, the tool layer, the agent loop, the policy engine, checkpoints, the TUI, session persistence, and memory — run `bevel` with no subcommand to open it, `bevel resume` to reopen a session you closed, and `bevel todos` to read the plan one left behind. The loop is covered by tests run against a real vLLM endpoint, and the TUI by Textual's Pilot. Sandboxing arrives in m12 — see [Build order](#build-order). `bevel` refuses to print a friendly lie about anything that isn't built yet: unimplemented subcommands exit non-zero and name the milestone that delivers them, and the TUI prints the seams the loop does not implement instead of letting you assume they exist.
+> **Status: under construction.** Built and tested today: the scaffold, capability probing and `bevel doctor`; the provider layer; the tool layer; the agent loop; the policy engine and approvals; checkpoints; the TUI; session persistence and resume; memory and recall; and the todo list. Run `bevel` with no subcommand to open the TUI, `bevel resume` to reopen a session you closed, and `bevel todos` to read the plan one left behind. The loop is covered by tests run against a real vLLM endpoint, and the TUI by Textual's Pilot.
+>
+> **Not built:** the L3 context handoff (m08d), the MCP client (m10), git/PR operations (m11), every sandbox backend above the path jail (m12), and the eval harness (m13). `bevel mcp`, `bevel pr`, `bevel sandbox` and `bevel eval` exist in `--help` and exit non-zero naming that milestone rather than pretending. `bevel doctor` reports what your machine *could* enforce, which is not the same as what bevel *does* enforce — see [Why this exists](#why-this-exists). `bevel` refuses to print a friendly lie about anything that isn't built: unimplemented subcommands name the milestone that delivers them, and the TUI prints the seams the loop does not implement instead of letting you assume they exist.
 
 ## Why this exists
 
@@ -16,27 +18,26 @@ bevel is built around three commitments:
 
 **Your hardware is the backend.** A 70B on a DGX Spark, a quantised 14B on a laptop, a speculative-decoding `llama-server` — all first-class. Endpoints are profiles in config, and each profile records what that server actually supports (`/tokenize`, `/embeddings`, parallel tool calls, streaming) rather than assuming the intersection of everyone's servers.
 
-**Enforcement you can verify.** Sandboxing is not a permission check dressed up as security. bevel has three tiers, and the UI reports the level it *verified*, not the level you asked for:
+**Enforcement you can verify.** Sandboxing is not a permission check dressed up as security. bevel is designed around three tiers, and the UI will report the level it *verified*, not the level you asked for:
 
-| Tier | Linux | Windows |
-|---|---|---|
-| **T0** policy jail | always on — path jail, command allowlist, egress policy | same |
-| **T1** in-process kernel | Landlock + seccomp + rlimits via `ctypes` | AppContainer + restricted token + low IL + Job Object |
-| **T2** OS container | `bwrap` | Windows Sandbox |
+| Tier | Linux | Windows | Status |
+|---|---|---|---|
+| **T0** policy jail | path jail + argv rule tables (safe allowlist, destructive denylist) | same | ✅ **runs today** |
+| **T1** in-process kernel | Landlock + seccomp + rlimits via `ctypes` | AppContainer + restricted token + low IL + Job Object | ⬜ m12 — designed, not built |
+| **T2** OS container | `bwrap` | Windows Sandbox | ⬜ m12 — opt-in, not built |
 
-T1 needs **zero installs** — pure `ctypes`, no compiled wheels, so it works on a machine you cannot apt-get on. T2 is opt-in (`--untrusted-repo`, m12) and deliberately not the default: a 10–30 s cold start per command is unusable for an agent that runs `pytest` forty times a session, and a disposable container is the wrong shape for a tool whose job is writing real edits to real files.
+**What actually protects you right now is T0**: the path jail in `core/tools/base.py` and the rule tables in `core/policy/rules.py`. It is a real, tested boundary against a confused model, and it is not security against an adversarial one — symlinks, junctions, 8.3 short names and NTFS alternate data streams all have ways through a textual check, and `core/sandbox/` contains no backend yet. `bevel doctor` probes for the T1/T2 primitives and reports `best tier 1` on a capable Windows machine; that is a statement about your *kernel*, not about bevel. Until m12 ships the backends, bevel enforces T0 and nothing more.
 
-If a self-test cannot *prove* a tier denies what it claims to deny, bevel drops to the tier it can prove and says so in the UI.
+The design that m12 has to honour: T1 needs **zero installs** — pure `ctypes`, no compiled wheels, so it works on a machine you cannot apt-get on. T2 is opt-in (`--untrusted-repo`) and deliberately not the default: a 10–30 s cold start per command is unusable for an agent that runs `pytest` forty times a session, and a disposable container is the wrong shape for a tool whose job is writing real edits to real files.
 
-**Three runtime dependencies.** `textual`, `httpx`, `pygments`. All pure Python. `uv tool install bevel` must work on Windows and ARM64 with no build step, so the MCP client, the memory store, and the sandbox bindings are hand-rolled on the standard library rather than pulled from PyPI.
+If a self-test cannot *prove* a tier denies what it claims to deny, bevel drops to the tier it can prove and says so in the UI. That self-test is itself an m12 deliverable — there is no `selftest.py` to run today.
+
+**Three runtime dependencies.** `textual`, `httpx`, `pygments`. All pure Python. `uv tool install bevel` must work on Windows and ARM64 with no build step, so the memory store is hand-rolled on the standard library rather than pulled from PyPI — and the same rule is what the not-yet-built MCP client (m10) and sandbox bindings (m12) will have to satisfy.
 
 ## Install
 
-```powershell
-uv tool install bevel
-```
-
-Or from a clone:
+Not on PyPI yet — `uv tool install bevel` is what m14 will make true, and today it
+fails. Install from a clone:
 
 ```powershell
 git clone https://github.com/thadreber-web/bevel
@@ -49,17 +50,17 @@ Requires Python 3.11+.
 
 ## Getting started
 
-`bevel doctor` is the honest starting point — it reports what your machine can genuinely enforce, which is worth reading before you trust anything else this project tells you:
+`bevel doctor` is the honest starting point — it reports what your machine is *capable of* enforcing, which is worth reading before you trust anything else this project tells you:
 
 Real output from a Windows 11 machine (the Linux columns are the same idea with Landlock and seccomp in place of AppContainer):
 
 ```
 bevel doctor
 ============
-  platform        Windows 10.0.26200 (AMD64)
+  platform        Windows 10.0.26300 (AMD64)
   python          3.11.16
   in container    no
-  best tier       1 (0=policy-only, 1=kernel, 2=os-container; verified at runtime by self-test)
+  best tier       1 (0=policy-only, 1=kernel, 2=os-container; what your OS could enforce)
 
   sandbox capabilities
     [no ] landlock          not Linux
@@ -69,11 +70,19 @@ bevel doctor
     [no ] windows_sandbox   binaries staged but WindowsSandboxService is not installed; enable the Containers-DisposableClientVM feature
     [no ] bwrap             not Linux
 
-  Static probing only. bevel reports the enforcement level it *verified*,
-  which can be lower than 'best tier' above.
+  Tier 2 (Windows Sandbox / bwrap) is opt-in and is not used for ordinary
+  tool calls: a 10-30s cold start per command is unusable, and the
+  container is disposable while an agent must write real edits. It is
+  enabled by config when m12 delivers the container backends.
+
+  Static probing only. No sandbox backend ships yet: bevel enforces the T0
+  policy jail, whatever 'best tier' above says. m12 adds the backends and
+  the self-test that would justify a higher number.
 ```
 
-Note the last two lines and the `windows_sandbox` row. `WindowsSandbox.exe` is staged on capable SKUs whether or not the feature is enabled, so bevel checks for the service rather than the executable and refuses to advertise tier 2 it cannot reach.
+Read that output for what it is. It says `best tier 1`, which describes your kernel, not bevel — the self-test that would justify a higher claim is an m12 deliverable, so today nothing is verified and the only tier in force is T0.
+
+Note also the `windows_sandbox` row. `WindowsSandbox.exe` is staged on capable SKUs whether or not the feature is enabled, so bevel checks for the service rather than the executable and refuses to advertise tier 2 it cannot reach.
 
 Then point it at a server. bevel refuses to invent an endpoint, so `bevel` exits with `no endpoint configured` until you give it one. Copy the example and fill in two values:
 
@@ -123,7 +132,7 @@ llama-server -hf ggml-org/Qwen2.5-Coder-32B-Instruct-GGUF \
   --jinja --port 8080 --parallel 4 --cont-batching
 ```
 
-Per-provider notes, including the parallel-tool-call and grammar (`--grammar-file` / `--grammar`) requirements, are a m14 deliverable. Until they exist, the flags above are the ones that actually matter and `bevel doctor` is the source of truth for what your endpoint supports.
+Per-provider notes, including the parallel-tool-call and grammar (`--grammar-file` / `--grammar`) requirements, are in [docs/provider-notes.md](docs/provider-notes.md) — probed against live servers rather than copied from their docs. The flags above are the ones that actually matter; `bevel doctor` is the source of truth for what your machine can enforce.
 
 Then run it:
 
@@ -138,16 +147,16 @@ Close it and the conversation is not gone: `bevel sessions` lists what is stored
 ## What it does
 
 - **Agent loop** — orient → plan → act → observe, under explicit iteration, tool-call, and token budgets, with cancellation wired end-to-end: `cancel()` abandons the in-flight request *and* the tool tasks, which for the shell tool means the whole process tree. `core/agent.py` is covered by tests run against a real endpoint, and [docs/agent-loop.md](docs/agent-loop.md) explains the decisions.
-- **Tools** — read, grep, glob, write, edit (real diff application), todo (whole-list replace, described below), shell (timeouts, process-tree kill). Each declares its JSON Schema and risk tier; `core/tools/registry.py` is the single source of truth for the offered list, and [docs/tool-layer.md](docs/tool-layer.md) explains the decisions.
-- **Tiered approvals** — `READ` free, `WRITE_WORKSPACE` ask, `WRITE_OUTSIDE` always ask, `EXEC_SAFE` free once allowlisted, `EXEC_UNSAFE` ask, `EXEC_DESTRUCTIVE` always ask with typed confirmation, `NETWORK_EGRESS` ask. Rules are learnable and every decision is logged with the rule that produced it. Checkpoints run even under `--yolo`.
+- **Tools** — read, grep, glob, recall, todo, write, edit (real diff application), remember, shell (timeouts, process-tree kill). Each declares its JSON Schema and risk tier; `core/tools/registry.py` is the single source of truth for the offered list, and [docs/tool-layer.md](docs/tool-layer.md) explains the decisions.
+- **Tiered approvals** — `READ` free, `WRITE_WORKSPACE` ask, `WRITE_OUTSIDE` always ask, `EXEC_SAFE` free once allowlisted, `EXEC_UNSAFE` ask, `EXEC_DESTRUCTIVE` always ask with typed confirmation, `NETWORK_EGRESS` ask. Rules are learnable and every decision is logged with the rule that produced it. `f2` cycles plan → default → auto; auto mode still asks for `WRITE_OUTSIDE` and `EXEC_DESTRUCTIVE`, and checkpoints are taken regardless of how approvals were answered. `AutoApprover` exists for callers that want no prompts at all, but there is no CLI flag for it yet — the TUI always asks.
 - **TUI** — `bevel` with no subcommand. A streaming transcript (markdown answers, collapsed italic reasoning), one card per tool call coloured by its outcome, a full-screen diff viewer, plan/default/auto modes, an approval dialog, and `Ctrl+C` that genuinely stops the run. Tested with Textual's Pilot against `MockProvider`.
 - **Sessions** — every turn, tool call (name, arguments, outcome, observation) and usage row is written through to SQLite as the loop goes, one commit per write, so a turn that completed survives the process. `bevel sessions` lists recent sessions with their workspace, times, turn count and token totals; `bevel resume [id]` reopens one — the transcript you see is read back from the file, and the model continues with that history. Resume trims an unusable tail (a crash between asking for calls and getting results) and says how much it dropped. The reopened transcript is verified against a real endpoint by a test that asks the model to recall a fact from the closed session.
 - **Checkpoints** — the working tree, uncommitted work-in-progress included, is committed to a `bevel/checkpoint/<session>` ref before the agent's first write, and `bevel undo` rewinds it from either the CLI or the TUI.
 - **Context management** — a project map on the model's first request, and two levels of compaction: L1 truncates stale tool observations to head+tail plus a pointer naming the call to re-run and the session holding the full text, L2 summarises the middle of the transcript and keeps the last N turns byte-identical. Both are triggered by the server's own `prompt_tokens`, never a chars/4 guess. The L3 handoff is not built — its three inputs (project map, recalled memory from m09a, the todo list from m09b) all exist now, and what is missing is composing them into a handoff brief that continues the task in a fresh context. The loop says so.
 - **Memory** — what bevel learned in an earlier session, in `~/.local/share/bevel/memories.db`, off until you turn `[memory]` on. Retrieval is two-stage: FTS5 `MATCH` + `bm25` narrows to ~100 candidates in single-digit milliseconds, and cosine re-ranks only those — a full-corpus cosine scan in pure Python is 5.4 s at 50 000 rows, which is why it is not what happens. Memories are typed (`fact`/`feedback`/`decision`/`reference`) and ranked importance-dominant, so a decision from six months ago beats yesterday's trivia; recency is at most a 2% tiebreaker. A contradicting memory is **superseded, never deleted** — the old row keeps `superseded_by`, stops being recalled, and stays readable with `bevel memories show <id>`. Vectors are opt-in, stored pre-normalised, and tagged with the model that produced them; recall refuses to compare vectors from different models rather than averaging incompatible spaces, and when `/embeddings` is absent it stays lexical and says so on the result. Recalled memories are injected as their own message after the system prompt, budgeted in tokens via `/tokenize`, and name what they dropped rather than silently truncating. The model reaches it with `remember` (`WRITE_OUTSIDE`, so always-ask — unless you set `[memory] auto_accept = true`, which exempts `remember` alone, never a second out-of-workspace tool and never a path that escapes the jail, and is logged as `config:memory:auto_accept`) and `recall` (`READ`); you reach it with `bevel memories list|show|supersede`. Porter stemming is a known limit: it unifies `index`/`indexes`/`indexed` but not `broke`/`broken`/`break`.
 - **Todos** — the model keeps its plan with one `todo` tool that **replaces** the whole list each time, so marking a step done means resending the list with that row's status changed. It lives in a `todos` table beside the other session rows in `sessions.db`, scoped to the session and cascade-deleted with it, ordered by an explicit `position` rather than by insertion order. It is declared `READ`, not `WRITE_WORKSPACE`: the row is bookkeeping about the agent's own plan, not a byte of your workspace, and an approval prompt per plan update would train you to approve without reading — the justification is written into the module and pinned by a test. The schema is strict where a small model is loose: `additionalProperties: false` at both levels, so an invented `id` or a status spelled `finished` is refused before it reaches the store, and `maxItems: 32` is set by what a model reproduces faithfully in one call rather than by anything SQLite cares about. An empty list legitimately means *cleared*. `is_parallel_safe` is off, because two concurrent whole-list replaces race. The plan is yours to read with `bevel todos [id]` — read-only, refuses to create the database, and offers no `clear`, because clearing is the model's job and a spare one would be a mistyped id away from destroying the plan you came to read. A TUI panel for it is not built.
-- **MCP** — hand-rolled JSON-RPC over stdio and streamable-HTTP, implementing the subset that matters.
-- **Evals** — TOML task specs against a fixture repo with a seeded bug, asserting that tests pass, that the diff contains what it should, and that it stays under token and cost ceilings.
+- **MCP** — *not built (m10).* `bevel mcp` exits non-zero naming the milestone. The plan is hand-rolled JSON-RPC over stdio and streamable-HTTP covering `initialize`, `tools/list`, `tools/call`, `resources/list`, `resources/read` — nothing in `src/bevel/mcp/` yet but the docstring that says so.
+- **Evals** — *not built (m13).* The plan is TOML task specs against a fixture repo with a seeded bug, asserting that tests pass, that the diff contains what it should, and that it stays under token and cost ceilings. `src/bevel/evals/` and `tests/evals/` are empty.
 
 ## Testing
 
@@ -171,19 +180,21 @@ src/bevel/
   _capability.py    read-only sandbox probes; never enforces, never mutates
   config/           layered configuration
   providers/        everything that speaks HTTP; base.py is the only seam
-  core/agent.py     the loop
+  core/agent.py     the loop, and the budgets it runs under
   core/tools/       one file per tool; declares JSON Schema + risk tier
-  core/context/     budgeting, compaction, project map
+  core/context/     compaction (L1/L2) and the project map
   core/policy/      tiered engine, rules, approvals, decision log
-  core/sandbox/     T0/T1/T2 backends + self-test
+  core/sandbox/     empty until m12 — no backends, no self-test
   core/checkpoint/  session snapshot commit on a side ref, restore API
   core/session/     SQLite: turns, tool calls, token + cost accounting
   core/memory/      FTS5 + optional vector recall
-  mcp/  evals/  tui/  render/
-tests/{unit,integration,tui,evals}/
+  mcp/              empty until m10
+  evals/            empty until m13
+  tui/  render/
+tests/{unit,integration,tui}/   tests/evals/ is empty until m13
 ```
 
-Probing, enforcement, and verification are three separate roles. `_capability.py` only reads. `core/sandbox/` backends only enforce. `selftest.py` only verifies. Keeping them apart is what makes the reported enforcement level trustworthy.
+Probing and enforcement are meant to be separate roles, which is why `_capability.py` only reads and never enforces. The other half of that separation — a `core/sandbox/` backend that only enforces, and a `selftest.py` that only verifies — is the m12 design, and neither file exists yet. Until they do, treat the enforcement level as T0 regardless of what the probes report.
 
 ## Build order
 

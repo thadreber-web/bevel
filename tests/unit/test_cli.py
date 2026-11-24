@@ -70,6 +70,13 @@ class TestDoctor:
         out = capsys.readouterr().out
         assert "Static probing only" in out
 
+    def test_doctor_never_claims_a_self_test_ran(self, capsys: pytest.CaptureFixture[str]) -> None:
+        """The self-test is m12. Claiming it verified anything would be a fake."""
+        main(["doctor"])
+        out = capsys.readouterr().out
+        assert "verified at runtime" not in out
+        assert "bevel enforces the T0" in out
+
 
 class TestPendingSubcommands:
     @pytest.mark.parametrize("command", sorted(_PENDING))

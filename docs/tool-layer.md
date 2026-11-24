@@ -1,13 +1,13 @@
 # Tool layer (m03)
 
 Everything the model can actually *do* lives in `src/bevel/core/tools/`. This page
-records the decisions that are not obvious from the code, and the two things the
-layer deliberately does **not** do yet.
+records the decisions that are not obvious from the code, and what the layer
+deliberately does **not** do: contain anything beyond the path jail.
 
 The entry point is `tools/registry.py` — the single source of truth for the offered
 tool list, as `core/tools/types.py` has always claimed. `tools()` returns the
 instances in offer order, `get(name)` looks one up, `specs()` returns the
-wire-facing `ToolSpec` tuple. Adding a tool means adding one element to `_TOOLS`;
+wire-facing `ToolSpec` list. Adding a tool means adding one element to `_TOOLS`;
 nothing else needs to know it exists.
 
 ## The contract
@@ -20,10 +20,14 @@ harness calls: it validates arguments against the schema with
 assume their arguments are valid** — `execute()` indexes required keys directly and
 will raise `KeyError` if called bare. Always go through `call_tool`.
 
-`ToolContext` carries the workspace root, the platform capabilities from m01, and a
-logger. Every path argument is normalised through it (`resolve`,
-`require_within_workspace`, `display`, `relative`) — no tool builds a path by
-concatenation, and no tool reports a path the user can't paste back.
+`ToolContext` carries the workspace root plus two optional stores — `memory`
+(m09a) and `todos` (m09b) — both `None` when unconfigured, and both optional and
+last so `ToolContext(workspace)` still works. It does **not** carry the platform
+capabilities from m01, a logger, or a sandbox handle; a tool that needs one of
+those does not have it, and `mcp/`, `evals/` and `core/sandbox/` are still empty
+docstring-only packages. Every path argument is normalised through the context
+(`resolve`, `require_within_workspace`, `display`, `relative`) — no tool builds a
+path by concatenation, and no tool reports a path the user can't paste back.
 
 The `Tool` protocol declares `spec` / `risk_tier` / `is_parallel_safe` as
 read-only properties rather than attributes. That is deliberate: mypy rejects a
@@ -40,11 +44,23 @@ allow/ask/deny from the tier plus the argv, and a tool may not self-declare
 | --- | --- |
 | `READ` | no side effects; safe to run concurrently |
 | `WRITE_WORKSPACE` | mutates files inside the workspace root |
+| `WRITE_OUTSIDE` | writes outside the root; always asks |
+| `EXEC_SAFE` | runs a command the allowlist covers; free once allowlisted |
 | `EXEC_UNSAFE` | runs arbitrary code |
+| `EXEC_DESTRUCTIVE` | always asks, with typed confirmation |
+| `NETWORK_EGRESS` | leaves the machine; asks |
 
-`read`, `grep`, `glob` are `READ` and `is_parallel_safe = True`. `write` and `edit`
-are `WRITE_WORKSPACE` and **not** parallel-safe — two concurrent writes to the same
-file lose one of them. `shell` is `EXEC_UNSAFE` and not parallel-safe.
+`read`, `grep`, `glob`, `recall` and `todo` are `READ`. `write` and `edit`
+are `WRITE_WORKSPACE` and **not** parallel-safe — two concurrent writes to the
+same file lose one of them. `remember` is `WRITE_OUTSIDE` because the memory
+database lives in `~/.local/share/bevel/`, outside every workspace. `shell` is
+`EXEC_UNSAFE` and not parallel-safe.
+
+`todo` being `READ` looks like a bug — it writes to SQLite — and the reason is in
+`tools/todo.py`. Nothing it does touches a workspace file, the rows are scoped to
+its own session and discarded with it, and declaring it `WRITE_WORKSPACE` would
+put an approval prompt in front of every progress update, which trains the user to
+approve without reading. `recall` is `READ` and parallel-safe; `remember` is not.
 
 ## The path jail is not security
 
@@ -72,6 +88,23 @@ failure naming the pattern error, not a traceback.
 so `src/**/*.py` and `*.py` both behave the way the model expects. 500 results by
 default, 5000 cap. "No matches" is a successful result, not a failure.
 
+**`recall`** — `query` in, ranked memories out. Two-stage: FTS5 `MATCH` + `bm25`
+narrows to ~100 candidates, and cosine re-ranks only those when a vector model is
+configured. Read-only and parallel-safe, so the model can ask before assuming it
+knows a project convention. When memory is not configured the tool fails loudly
+rather than returning an empty list — "nothing matched" and "memory is off" are
+different answers. See [agent-loop.md](agent-loop.md) for the ranking rules.
+
+**`todo`** — the model's plan for the session. One call replaces the whole list;
+there are no ids, no `action` enum and no merge semantics, because an
+item-addressable interface asks a small model to remember an identifier it
+invented three turns ago. `content` is capped at 200 characters and the list at 32
+items — the ceiling is what a small model reproduces faithfully in one call, not
+anything SQLite cares about. `additionalProperties: false` at both levels, so an
+invented `id` or a status spelled `finished` is refused before it reaches the
+store. Not parallel-safe: two concurrent whole-list replaces race. An empty list
+legitimately means *cleared*.
+
 **`write`** — creates or replaces a whole file, creating parent directories on the
 way. An existing file is never clobbered unless `overwrite: true`; the result is a
 unified diff of the change (or "no change"), so the transcript shows what happened
@@ -91,6 +124,12 @@ replacement, then restores the original style. Style is detected as CRLF only wh
 mixed-ending file is treated as LF and left mixed rather than silently converted.
 The trailing newline is preserved in both directions. This is what makes the tool
 usable on a Windows dev machine without producing whole-file diffs.
+
+**`remember`** — store one durable thing, permanently. `content` plus a `type` of
+`fact` / `feedback` / `decision` / `reference`, and the row is stamped with the
+repository scope it was learned in. Writes outside the workspace, so it always
+asks — unless `[memory] auto_accept = true`, which exempts `remember` alone. A
+contradicting memory is superseded, never deleted.
 
 **`shell`** — see below.
 

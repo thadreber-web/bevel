@@ -65,11 +65,11 @@ Before considering any change done: `ruff check`, `mypy`, and `pytest` all green
 
 | Tempting dependency | What bevel does instead |
 |---|---|
-| `mcp` SDK (pulls `pydantic-core`, Rust) | JSON-RPC over stdio + streamable-HTTP in `mcp/`, subset only: `initialize`, `tools/list`, `tools/call`, `resources/list`, `resources/read` |
-| `pydantic`, `pyyaml` | stdlib `tomllib` for config; dataclasses for models |
-| `numpy` / a vector DB | SQLite FTS5 from stdlib + brute-force `float32` cosine over server `/embeddings` |
-| `python-prctl`, seccomp/AppContainer bindings | `ctypes` against `libc` / `kernel32` / `kernelbase` / `userenv` / `advapi32` |
+| `pydantic`, `pyyaml` | stdlib `tomllib` for config; dataclasses for models — ships today |
+| `numpy` / a vector DB | SQLite FTS5 from stdlib + brute-force `float32` cosine over server `/embeddings` — ships today |
 | `rich` directly | it arrives transitively via `textual`; don't import it as a direct dependency |
+| `mcp` SDK (pulls `pydantic-core`, Rust) | *planned, m10 — `mcp/` is empty until then:* JSON-RPC over stdio + streamable-HTTP, subset only: `initialize`, `tools/list`, `tools/call`, `resources/list`, `resources/read` |
+| `python-prctl`, seccomp/AppContainer bindings | *planned, m12 — `core/sandbox/` is empty until then:* `ctypes` against `libc` / `kernel32` / `kernelbase` / `userenv` / `advapi32` |
 
 Dev-only tools (`pytest`, `ruff`, `mypy`, …) live in `[dependency-groups] dev` and are unconstrained.
 
@@ -84,15 +84,19 @@ src/bevel/
   providers/        everything that speaks HTTP; base.py is the only seam
   core/agent.py     the loop: orient -> plan -> act -> observe, under budgets
   core/tools/       one file per tool; declares JSON Schema + risk tier
-  core/context/     budgeting, 3-level compaction, project map
+  core/context/     compaction (L1/L2), project map (budgets live in core/agent.py)
   core/policy/      tiered engine, rules, approvals, decision log
-  core/sandbox/     T0/T1/T2 backends + self-test
+  core/sandbox/     empty until m12 (T0/T1/T2 backends + self-test)
   core/checkpoint/  session snapshot commit on a side ref, restore API
   core/session/     SQLite: turns, tool calls, token + cost accounting
   core/memory/      FTS5 + optional vector recall
-  mcp/  evals/  tui/  render/
-tests/{unit,integration,tui,evals}/
+  mcp/              empty until m10
+  evals/            empty until m13
+  tui/  render/
+tests/{unit,integration,tui}/   tests/evals/ is empty until m13
 ```
+
+Only the T0 path jail (`core/tools/base.py`) and the rule engine (`core/policy/`) enforce anything today. `bevel doctor` reports what the OS *could* enforce, which is not what bevel does.
 
 ## The agent loop
 

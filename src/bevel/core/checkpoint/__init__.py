@@ -4,8 +4,8 @@ One snapshot of the working tree per session, taken before the agent's first
 write, and a restore back to it. See :mod:`bevel.core.checkpoint.snapshot` for
 why the snapshot is built from a throwaway index rather than a git worktree.
 
-Checkpoints run even under ``--yolo``: auto-approval governs what the agent may
-do, not whether it can be undone.
+Checkpoints are taken whatever the approver does: auto-approval governs what the
+agent may do, not whether it can be undone.
 """
 
 from __future__ import annotations
