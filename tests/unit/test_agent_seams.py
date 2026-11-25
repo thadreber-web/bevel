@@ -14,9 +14,14 @@ import pytest
 from bevel.core.agent import DEFAULT_SYSTEM_PROMPT, UNBUILT_SEAMS
 
 
-def test_unbuilt_seams_is_context_only() -> None:
-    assert len(UNBUILT_SEAMS) == 1, UNBUILT_SEAMS
-    assert all("m08" in seam for seam in UNBUILT_SEAMS), UNBUILT_SEAMS
+def test_unbuilt_seams_is_empty() -> None:
+    """m08d built the last seam, so the loop must stop disclaiming anything.
+
+    An entry that outlives its milestone is a lie about a built feature: the model
+    is told the handoff does not exist and stops expecting an over-long run to
+    continue. This assertion is what makes that impossible to miss.
+    """
+    assert UNBUILT_SEAMS == ()
 
 
 def test_session_persistence_is_no_longer_reported_as_unbuilt() -> None:

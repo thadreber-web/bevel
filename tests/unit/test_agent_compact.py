@@ -503,13 +503,15 @@ async def test_the_run_stops_when_compaction_cannot_fit_the_window(tmp_path: Pat
     assert result.stop_reason is StopReason.CONTEXT_OVERFLOW
     assert result.ok is False
     assert result.error is not None
-    assert "l1 and l2" in result.error
     assert f"{OVER} prompt tokens" in result.error
     assert f"window of {WINDOW}" in result.error
-    assert "L3" in result.error
-    assert "not built" in result.error
+    # L3 was reached and *declined*, naming why: one turn is not a transcript any
+    # brief can compress. The run stopped because the handoff refused, not because
+    # it does not exist.
+    assert "hand off" in result.error
+    assert "not built" not in result.error
     (event,) = _work(result.events)
-    assert event.text.startswith("l1: nothing left to cut; l2: no progress")
+    assert event.text.startswith("l1: nothing left to cut; l2: no progress; l3:")
     # No generation is spent on an L2 that cannot have a middle.
     assert summariser.shown == []
     # And the request the server would have rejected was never sent.
@@ -519,20 +521,21 @@ async def test_the_run_stops_when_compaction_cannot_fit_the_window(tmp_path: Pat
 # ------------------------------------------------------------------- the seams
 
 
-def test_the_unbuilt_seam_is_exactly_l3() -> None:
-    """Persistence shipped in m08c; only the L3 handoff may still be disclaimed."""
-    assert len(UNBUILT_SEAMS) == 1
-    joined = " ".join(UNBUILT_SEAMS).lower()
-    assert "l3" in joined
-    assert "persistence" not in joined
-    assert "resume" not in joined
-    # L1 and L2 may be *named* (they are L3's inputs) but neither may be reported
-    # as missing. The subject of each seam is the text before "is not built".
+def test_compaction_is_no_longer_reported_as_unbuilt() -> None:
+    """m08d built the L3 handoff; the loop must stop disclaiming any level.
+
+    The subject of each seam is the text before "is not built". L1, L2 and L3 may
+    all be *named* by a future seam (they are each other's inputs) but none of them
+    may be reported as missing -- a stale entry tells the model an over-long run
+    ends, and it stops trying to continue one.
+    """
     for seam in UNBUILT_SEAMS:
         subject = seam.lower().split("is not built")[0]
         assert "l1" not in subject
         assert "l2" not in subject
-        assert "compaction" in subject
+        assert "l3" not in subject
+        assert "compaction" not in subject
+        assert "handoff" not in subject
 
 
 async def test_a_compaction_that_ran_never_reports_itself_as_unbuilt(tmp_path: Path) -> None:

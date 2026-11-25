@@ -96,22 +96,22 @@ def styles(app: BevelApp, needle: str) -> list[str]:
 # --------------------------------------------------------------------- startup
 
 
-async def test_seams_are_announced_before_any_task(make_app: Callable[..., BevelApp]) -> None:
-    """What is not built is said out loud, on mount, without being asked.
+async def test_nothing_is_announced_as_unbuilt_on_mount(make_app: Callable[..., BevelApp]) -> None:
+    """The badge is gone because the seams are gone, not because it was hidden.
 
-    m08c deliberately flipped this assertion: session persistence used to be
-    announced here as unbuilt. It is built now, so the only seam left in m08 is
-    the L3 handoff, and a run must say so without also claiming it cannot store.
+    m08d built the last one, the L3 handoff. The TUI renders ``UNBUILT_SEAMS``
+    verbatim and has no idea what any of them are, so an empty list must produce
+    silence here rather than a special-cased "all clear" line -- and if a seam is
+    ever added back, this test goes red until the announcement is wanted again.
     """
+    assert UNBUILT_SEAMS == ()
     app = make_app(ScriptedTurn(content="hi"))
     async with app.run_test() as pilot:
-        await settle(pilot, lambda: len(lines(app)) >= len(UNBUILT_SEAMS))
+        await pilot.pause(0.05)
         shown = lines(app)
-    assert len(UNBUILT_SEAMS) == 1
-    for seam in UNBUILT_SEAMS:
-        assert any(seam in line for line in shown), seam
-    assert all("not built" in line for line in shown if "m08" in line)
-    assert not any("not built" in line and "persist" in line for line in shown)
+    # Not merely "no disclaimer" -- mount writes nothing at all when there is
+    # nothing to disclaim, so there is no "all clear" line either.
+    assert shown == [], shown
 
 
 async def test_title_names_the_model_and_the_mode(make_app: Callable[..., BevelApp]) -> None:
@@ -687,25 +687,34 @@ async def test_a_long_run_shows_a_context_line_naming_its_level(tmp_path: Path) 
     assert any("chars" in line for line in context), context
 
 
-async def test_the_l3_handoff_is_announced_as_not_built_on_mount(tmp_path: Path) -> None:
-    """Mount says the L3 handoff does not exist, before anyone asks."""
+async def test_the_l3_handoff_is_no_longer_announced_as_unbuilt_on_mount(
+    tmp_path: Path,
+) -> None:
+    """Mount stays quiet about L3, because L3 exists.
+
+    The mirror of the test above, kept separate because it pins the specific
+    sentence the old badge used: an over-long run ending rather than continuing.
+    If that disclaimer ever reappears, the handoff has been broken or walked back.
+    """
     app = _context_app(tmp_path, ScriptedTurn(content="hi"))
     async with app.run_test() as pilot:
-        assert await settle(pilot, lambda: len(lines(app)) >= len(UNBUILT_SEAMS))
+        await pilot.pause(0.05)
         shown = lines(app)
 
     l3 = [line for line in shown if "l3" in line.lower()]
-    assert l3, shown
-    assert all("not built" in line for line in l3)
-    assert any("context_overflow" in line for line in l3)
+    assert not l3, shown
+    assert not any("not built" in line for line in shown), shown
 
 
 async def test_a_context_overflow_stops_the_run_with_a_readable_line(tmp_path: Path) -> None:
     """The stop line is the user's only notice that the run was cut short.
 
-    One turn with one short observation: L1 has nothing to cut and there is no
-    middle for L2 to summarise, so both levels are exhausted on the first
-    over-budget measurement and the run must stop rather than be sent.
+    One turn with one short observation: L1 has nothing to cut, there is no middle
+    for L2 to summarise, and there is nothing for an L3 brief to fold, so all three
+    levels are exhausted on the first over-budget measurement and the run must stop
+    rather than be sent. The line says the context would not fit *and* carries the
+    reason the handoff declined, because "would not fit" alone cannot tell a
+    transcript that is merely too big from one that is too small to compress.
     """
     (tmp_path / "small.txt").write_text("one\ntwo\n", encoding="utf-8")
     app = _context_app(
@@ -724,7 +733,8 @@ async def test_a_context_overflow_stops_the_run_with_a_readable_line(tmp_path: P
         shown = lines(app)
 
     assert any("stopped: context would not fit" in line for line in shown), shown
-    assert any("L3" in line for line in shown), shown
+    assert any("hand off" in line for line in shown), shown
+    assert not any("not built" in line for line in shown), shown
 
 
 # ---------------------------------------------------------------------- resume

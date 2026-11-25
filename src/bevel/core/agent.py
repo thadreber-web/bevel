@@ -17,15 +17,15 @@ Step 7 takes the session's checkpoint commit before the first batch that writes 
 :mod:`bevel.core.context.project_map` goes on the wire before the first completion, so
 the model knows the layout without spending a tool call discovering it. Step 8 now
 compacts: when the server's own ``prompt_tokens`` come back over
-``Capabilities.max_model_len``, L1 truncates stale tool observations and, if that is
-not enough, L2 summarises the middle of the transcript (see
-:mod:`bevel.core.context.compact`). When a :class:`~bevel.core.session.store.SessionStore`
+``Capabilities.max_model_len``, L1 truncates stale tool observations, L2 summarises
+the middle of the transcript, and when neither can fit it L3 hands off — it writes a
+brief, rebuilds the context from the same shape the run opened with, and carries on
+(see :mod:`bevel.core.context.compact`). When a :class:`~bevel.core.session.store.SessionStore`
 is attached, every message, tool call and usage row is written through as it completes,
 and a run can continue a session that was closed earlier (see
-:mod:`bevel.core.session.resume`). What is still missing from step 8 — the L3 handoff
-that recovers when L1 and L2 cannot fit the transcript — is named in
-:data:`UNBUILT_SEAMS`, reported on every :class:`AgentResult`, and logged once per run.
-Nothing here pretends to do what it cannot. Policy (step 4) is enforced by
+:mod:`bevel.core.session.resume`). What the loop does *not* do is named in
+:data:`UNBUILT_SEAMS`, reported on every :class:`AgentResult`, and logged once per run;
+that list is empty, so every step above really happens. Policy (step 4) is enforced by
 :class:`~bevel.core.policy.PolicyEngine`.
 
 Cancellation
@@ -55,6 +55,7 @@ here prints a dollar figure.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from collections.abc import AsyncIterator, Awaitable, Sequence
 from dataclasses import dataclass, field
@@ -65,7 +66,7 @@ from typing import Any, Final
 
 from bevel.config.schema import PolicyConfig
 from bevel.core.checkpoint import snapshot
-from bevel.core.context.compact import compact_l1, compact_l2
+from bevel.core.context.compact import compact_l1, compact_l2, compact_l3, handoff_cut
 from bevel.core.context.project_map import build_project_map
 from bevel.core.memory.recall import memory_block
 from bevel.core.memory.store import MemoryStore
@@ -123,15 +124,18 @@ __all__ = [
 #: How many parallel-safe tool calls may be in flight at once.
 DEFAULT_CONCURRENCY: Final[int] = 4
 
-_SEAM_L3: Final[str] = (
-    "m08 (L3 compaction) is not built: when L1 and L2 cannot fit the transcript in the "
-    "window the run stops with context_overflow. The project map, the todo list and "
-    "recalled memory all exist now, but nothing composes them into a handoff brief or "
-    "carries the task into a fresh context, so an over-long run ends instead of continuing"
-)
+#: How many L3 handoffs one run may perform. Each one costs a generation and an
+#: iteration, so an uncapped L3 lets a model that never converges hand off its
+#: way through the whole token budget while going nowhere. Two is enough for a
+#: long task to be carried twice, and small enough that a run that needs a third
+#: is reported as out of room rather than quietly spending more.
+MAX_HANDOFFS: Final[int] = 2
 
-#: What this loop does *not* do, in the words the loop itself reports.
-UNBUILT_SEAMS: Final[tuple[str, ...]] = (_SEAM_L3,)
+#: What this loop does *not* do, in the words the loop itself reports. Empty means
+#: every step described above actually happens. An entry here is a disclaimer the
+#: model is told about, so it must be removed the moment the thing is built *and*
+#: tested -- and never added back to cover an unverified claim.
+UNBUILT_SEAMS: Final[tuple[str, ...]] = ()
 
 DEFAULT_SYSTEM_PROMPT: Final[str] = (
     "You are bevel, a coding agent working in a local workspace.\n"
@@ -199,6 +203,27 @@ SUMMARY_SYSTEM: Final[str] = (
     "symbol, command and number the agent has actually seen; what is settled; and what "
     "is still unresolved. Be dense and literal. Do not add advice, do not speculate "
     "about anything not in the transcript, and do not answer the task yourself."
+)
+
+#: What the L3 handoff summariser is told to do. Deliberately narrower than
+#: SUMMARY_SYSTEM: the goal, the files touched and the todos are assembled
+#: deterministically by the loop, so the model is asked only for the two sections
+#: it can honestly supply, and is explicitly forbidden from naming files.
+BRIEF_SYSTEM: Final[str] = (
+    "You are writing the handoff brief for a coding agent whose conversation has run "
+    "out of context window. Your notes are handed to a fresh instance of the same "
+    "agent that has seen none of this transcript, so anything you leave out is lost.\n"
+    "Write two sections, in this order, with these exact headings:\n"
+    "## decisions\n"
+    "The choices made during the work that a newcomer would otherwise repeat or "
+    "contradict: approaches taken and rejected, and why.\n"
+    "## open questions\n"
+    "What is still unresolved, including anything the work was in the middle of when "
+    "it ran out of room.\n"
+    "Only use what is in the transcript you are given. Never name a file, a command, "
+    "or a result that does not appear in it - the files the work touched are listed "
+    "elsewhere and are not yours to add to. Be terse; no preamble. Stay under about "
+    "eighty words: this text is prepended to a context that is already too long."
 )
 
 
@@ -427,6 +452,7 @@ class _RunState:
     messages: list[Message] = field(default_factory=list)
     events: list[AgentEvent] = field(default_factory=list)
     iterations: int = 0
+    handoffs: int = 0
     tool_calls: int = 0
     stop: StopReason = StopReason.COMPLETED
     error: str | None = None
@@ -564,6 +590,12 @@ class Agent:
         self._session_id = resume.session.id if resume is not None else None
         self._resumed = resume
         self._turn_row: int | None = None
+        # The task, verbatim, for the L3 handoff brief's goal. Set by _seed().
+        self._task = ""
+        # Relative paths the run actually changed, in the order it changed them.
+        # Assembled from ToolExecution.mutated, never from the model's account of
+        # what it did — a model is not allowed to name a file it did not touch.
+        self._mutated_paths: list[str] = []
 
     # ------------------------------------------------------------------- public
 
@@ -631,7 +663,7 @@ class Agent:
         self._cancel_event.clear()
         await self._seed(task, state)
         totals = _Totals()
-        logger.warning("agent loop starting with unbuilt seams: %s", "; ".join(UNBUILT_SEAMS))
+        logger.info("unbuilt seams: %s", "; ".join(UNBUILT_SEAMS) or "none")
         yield AgentEvent(AgentEventType.STARTED, iteration=0, text=task)
         try:
             while True:
@@ -695,17 +727,22 @@ class Agent:
             error=state.error,
         )
 
-    async def _seed(self, task: str, state: _RunState) -> None:
-        """Build the message list the first request is made of.
+    async def _opening(self, recall_query: str) -> list[Message]:
+        """The opening of a context: system prompt with a fresh map, then recall.
 
-        The system prompt carries a freshly built project map rather than a
-        stored one, so a resumed session never inherits a stale picture of the
-        tree. What *is* taken from the store is the conversation itself.
+        Shared by :meth:`_seed` and the L3 handoff so that a run resumed after a
+        handoff starts from the *same* shape as one that never needed one. The
+        project map is rebuilt rather than reused, so neither a resumed session
+        nor a handed-off one inherits a stale picture of the tree.
 
         Recalled memory goes at **index 1**, in its own message. It cannot be
         merged into the system prompt and cannot be ``messages[0]``, because
         :mod:`bevel.core.context.compact` never evicts ``messages[0]`` and a
         stale memory block has to be evictable.
+
+        ``recall_query`` is what to search memory with. At the start of a run it
+        is the task; mid-run the task is stale, so the handoff passes what the
+        agent was last working on instead.
         """
         # The walk is bounded but real disk I/O, and it happens while the TUI is
         # live, so it goes off the event loop.
@@ -715,10 +752,20 @@ class Agent:
             system = f"{system}\n\n{MEMORY_SYSTEM}"
         if self._todos is not None:
             system = f"{system}\n\n{TODO_SYSTEM}"
-        state.messages.append(Message.system(f"{system}\n\n{project_map}"))
-        block = await self._recall_block(task)
+        messages = [Message.system(f"{system}\n\n{project_map}")]
+        block = await self._recall_block(recall_query)
         if block is not None:
-            state.messages.insert(1, block)
+            messages.append(block)
+        return messages
+
+    async def _seed(self, task: str, state: _RunState) -> None:
+        """Build the message list the first request is made of.
+
+        The opening is :meth:`_opening`; the rest is the resumed conversation (if
+        any) and the task itself.
+        """
+        self._task = task
+        state.messages.extend(await self._opening(task))
         if self._resumed is not None:
             state.messages.extend(self._resumed.messages)
         task_message = Message.user(task)
@@ -746,6 +793,185 @@ class Agent:
             logger.exception("recall for the opening context failed; continuing without it")
             return None
         return block.message
+
+    # ------------------------------------------------------------------ handoff
+
+    def _record_mutation(self, execution: ToolExecution) -> None:
+        """Remember the path a successful write touched, for the handoff brief.
+
+        The list of files a run touched is assembled from what the loop actually
+        executed, never from what the model says it edited: a brief naming a file
+        nobody wrote is worse than one naming none. A call whose arguments cannot
+        be read contributes nothing rather than a guess.
+        """
+        if not execution.mutated:
+            return
+        try:
+            path = json.loads(execution.call.arguments).get("path")
+        except (ValueError, AttributeError):
+            return
+        if isinstance(path, str) and path and path not in self._mutated_paths:
+            self._mutated_paths.append(path)
+
+    def _file_lines(self) -> str:
+        if not self._mutated_paths:
+            return "no files were written"
+        return "\n".join(f"- {path}" for path in self._mutated_paths)
+
+    def _todo_lines(self) -> str:
+        """The todo list as the brief states it, or an honest account of its absence.
+
+        Read from the store rather than from the transcript, so the brief reports
+        the list as it stands now -- including the tasks the model marked done in
+        turns the handoff is about to drop.
+        """
+        if self._todos is None:
+            return "no todo list was kept"
+        try:
+            todos = self._todos.list_todos()
+        except Exception:
+            # Same rule as recall: an enhancement must not cost the user the task.
+            logger.exception("the todo list could not be read for the handoff brief")
+            return "the todo list could not be read"
+        if not todos:
+            return "no todo list was kept"
+        return "\n".join(f"- [{todo.status}] {todo.content}" for todo in todos)
+
+    def _recall_query(self, state: _RunState) -> str:
+        """What to search memory with when handing off.
+
+        The opening searched the task. Mid-run the task alone is stale -- the
+        agent is dozens of steps past it -- so the current work is searched
+        alongside it, and the task stays in the query because the goal did not
+        change just because the context did.
+        """
+        for message in reversed(state.messages):
+            if message.role == "assistant" and message.content.strip():
+                return f"{self._task} {message.content}"
+        return self._task
+
+    def _handoff_scaffold(self, dropped: Sequence[Message]) -> str:
+        """What the model is shown when it is asked for its account of the work.
+
+        The deterministic sections go first so the model is writing into a
+        structure rather than inventing one, and so the file list it is handed is
+        the list it is not allowed to extend.
+        """
+        transcript = "\n\n".join(
+            f"{message.role}: {message.content}" for message in dropped if message.content
+        )
+        return "\n\n".join(
+            [
+                f"## goal\n\n{self._task}",
+                f"## files touched\n\n{self._file_lines()}",
+                f"## todos\n\n{self._todo_lines()}",
+                f"## transcript being dropped\n\n{transcript}",
+            ]
+        )
+
+    def _brief_text(self, account: str) -> str:
+        """The finished brief: three sections the loop knows are true, one the model wrote."""
+        return "\n\n".join(
+            [
+                f"## goal\n\n{self._task}",
+                "## decisions and open questions (the previous instance's own account)\n\n"
+                f"{account}",
+                f"## files touched\n\n{self._file_lines()}",
+                f"## todos\n\n{self._todo_lines()}",
+            ]
+        )
+
+    async def _write_brief(self, scaffold: str, totals: _Totals) -> str:
+        """Ask the model for the two sections only it can supply.
+
+        Billed to the run, but not as the context reading: this prompt is the
+        material being dropped, not the next thing the model will see -- exactly
+        the case ``_Totals.add``'s ``counts_as_context`` exists for.
+        """
+        writer = self._summariser or self.provider
+        turn = await writer.complete(
+            [Message.system(BRIEF_SYSTEM), Message.user(scaffold)], None, self.options
+        )
+        totals.add(turn.usage or Usage(), counts_as_context=False)
+        return turn.message.content.strip()
+
+    async def _handoff(
+        self, state: _RunState, totals: _Totals, context: ContextState, against: str
+    ) -> tuple[AgentEvent, StopReason | None]:
+        """L3: carry the task into a fresh context instead of ending the run.
+
+        The transcript is rebuilt from the opening shape ``_seed()`` produces --
+        system prompt with a *fresh* project map, the recall block at index 1 --
+        followed by the brief and the last turns verbatim. Everything the brief
+        accounts for is dropped, including any L2 summary, which it supersedes.
+
+        Every way this can fail is a reported ``CONTEXT_OVERFLOW``, not a silent
+        one. A brief that cannot be written, that comes back empty, or that is
+        itself too big to fit leaves the run exactly where L1 and L2 left it,
+        because the alternative is sending a request the server is known to
+        reject. The per-run cap exists because a model that never converges can
+        otherwise hand off its way through the whole budget while going nowhere.
+        """
+
+        def declined(reason: str, error: str) -> tuple[AgentEvent, StopReason]:
+            state.error = error
+            logger.warning("handoff declined: %s", error)
+            return (
+                AgentEvent(
+                    AgentEventType.COMPACTION,
+                    iteration=state.iterations,
+                    context=context,
+                    text=f"l1: nothing left to cut; l2: no progress; {reason}; {against}",
+                ),
+                StopReason.CONTEXT_OVERFLOW,
+            )
+
+        if state.handoffs >= MAX_HANDOFFS:
+            return declined(
+                f"l3: per-run handoff cap of {MAX_HANDOFFS} reached",
+                f"transcript will not fit: {against}, and the per-run handoff cap of "
+                f"{MAX_HANDOFFS} is already spent.",
+            )
+        dropped = handoff_cut(state.messages)
+        if not dropped:
+            return declined(
+                "l3: no turns left to fold into a brief",
+                f"transcript will not fit: {against}, and there were no turns left to hand off.",
+            )
+        try:
+            account = await self._write_brief(self._handoff_scaffold(dropped), totals)
+        except Exception as exc:
+            return declined(
+                "l3: the brief request failed",
+                f"transcript will not fit: {against}, and the handoff brief could not be "
+                f"written: {type(exc).__name__}: {exc}",
+            )
+        if not account:
+            return declined(
+                "l3: the brief came back empty",
+                f"transcript will not fit: {against}, and the handoff brief was empty.",
+            )
+        head = await self._opening(self._recall_query(state))
+        l3 = compact_l3(state.messages, head=head, brief=self._brief_text(account))
+        if not l3.changed:
+            return declined(
+                f"l3: refused, {l3.reason}",
+                f"the handoff brief would not fit: {l3.reason}; {against}.",
+            )
+        text = (
+            f"l1: nothing left to cut; l2: no progress; l3: handoff replaced "
+            f"{l3.turns_replaced} turn(s), removed {l3.chars_removed} chars; {against}"
+        )
+        event = AgentEvent(
+            AgentEventType.COMPACTION, iteration=state.iterations, context=context, text=text
+        )
+        state.messages[:] = l3.messages
+        state.handoffs += 1
+        # The brief cost a generation, so the handoff costs an iteration: work the
+        # budget cannot see is work the budget cannot stop.
+        state.iterations += 1
+        logger.info("handed off: %s", text)
+        return (event, None)
 
     def _budget_stop(self, state: _RunState, totals: _Totals) -> tuple[StopReason, str] | None:
         """Why the next iteration must not start, or ``None`` to continue.
@@ -816,6 +1042,7 @@ class Agent:
             execution = item.as_execution()
             executions.append(execution)
             self._persist_execution(execution)
+            self._record_mutation(execution)
             yield AgentEvent(
                 AgentEventType.TOOL_COMPLETE,
                 iteration=state.iterations,
@@ -844,6 +1071,7 @@ class Agent:
             executions.extend(batch)
             for execution in batch:
                 self._persist_execution(execution)
+                self._record_mutation(execution)
                 yield AgentEvent(
                     AgentEventType.TOOL_COMPLETE,
                     iteration=state.iterations,
@@ -983,29 +1211,25 @@ class Agent:
                 return turn.message.content
 
             l2 = await compact_l2(state.messages, summarise)
-            if not l2.changed:
-                state.stop = StopReason.CONTEXT_OVERFLOW
-                state.error = (
-                    f"transcript will not fit: l1 and l2 left {against}. The L3 handoff that "
-                    "would restart the context from the project map, todos and recalled memory "
-                    "is not built."
+            if l2.changed:
+                state.messages[:] = l2.messages
+                head = "l1: nothing left to cut; " if l1.chars_removed == 0 else ""
+                text = (
+                    f"{head}l2: summarised {l2.turns_replaced} turn(s) into {len(l2.summary)} "
+                    f"chars, removed {l2.chars_removed} chars (summarised by {model}); {against}"
                 )
-                logger.warning("compaction exhausted: %s", state.error)
+                logger.info("compacted: %s", text)
                 return (
                     AgentEvent(
                         AgentEventType.COMPACTION,
                         iteration=state.iterations,
                         context=context,
-                        text=f"l1: nothing left to cut; l2: no progress; {against}",
+                        text=text,
                     ),
-                    StopReason.CONTEXT_OVERFLOW,
+                    None,
                 )
-            state.messages[:] = l2.messages
-            head = "l1: nothing left to cut; " if l1.chars_removed == 0 else ""
-            text = (
-                f"{head}l2: summarised {l2.turns_replaced} turn(s) into {len(l2.summary)} chars, "
-                f"removed {l2.chars_removed} chars (summarised by {model}); {against}"
-            )
+            # L3: neither level can fit the transcript, so hand off instead of stopping.
+            return await self._handoff(state, totals, context, against)
         logger.info("compacted: %s", text)
         return (
             AgentEvent(

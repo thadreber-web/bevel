@@ -39,7 +39,13 @@ INSECURE_TLS_ENV = "BEVEL_INSECURE_TLS"
 
 TRUTHY = frozenset({"1", "true", "yes", "on"})
 CONNECT_TIMEOUT_SECONDS = 5.0
-REQUEST_TIMEOUT_SECONDS = 60.0
+# Generous, because the capability probe is a real generation on a real GPU and a
+# reasoning model has to finish *thinking* before any of it arrives: probing this
+# repo's endpoint costs ~700 reasoning tokens ahead of ~211 completion tokens, and
+# at 60s that request intermittently times out. ``_ask`` fail-closes, so a timeout
+# is reported as "this model cannot call tools" and every capability-gated test
+# skips -- honestly, but on a coin flip, which makes the suite useless as a gate.
+REQUEST_TIMEOUT_SECONDS = 180.0
 
 
 def _env(name: str) -> str:

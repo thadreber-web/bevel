@@ -412,19 +412,18 @@ async def test_an_unknown_tool_is_answered_not_hung(
 async def test_unbuilt_seams_are_reported_on_every_result(
     endpoint: ModelProvider, workspace: Path
 ) -> None:
-    """What the loop does not do must ride out with every result.
+    """What the loop does not do must ride out with every result -- and it does nothing less.
 
-    This is the anti-fake guarantee: a caller that never reads the docs still
-    learns that the L3 handoff does not exist. Policy is enforced, checkpoints
-    are taken and a closed session can be reopened, so none of those is among
-    the seams.
+    This is the anti-fake guarantee in the other direction: a caller that never
+    reads the docs still learns the truth about the loop. m08d built the last
+    seam, so against a real server the list must be empty. If a claim here ever
+    turns out to be false, the honest fix is a new seam entry, not a deleted test.
     """
     agent = Agent(endpoint, workspace, budgets=Budgets(max_iterations=1), options=GEN)
     result = await agent.run("Say ok.")
 
     assert result.seams == UNBUILT_SEAMS
-    assert len(result.seams) == 1
-    assert all("m08" in seam for seam in result.seams)
+    assert result.seams == ()
 
 
 async def test_compaction_reports_the_servers_own_context_size(
@@ -526,12 +525,14 @@ async def test_l1_against_a_real_endpoint_cuts_and_points_at_the_call(
 async def test_a_window_nothing_can_fit_stops_with_context_overflow(
     endpoint: ModelProvider, workspace: Path
 ) -> None:
-    """When L1 and L2 cannot help, the run stops instead of being sent.
+    """When L1, L2 *and* L3 cannot help, the run stops instead of being sent.
 
-    One short observation and one turn: L1 has nothing long enough to cut and there
-    is no middle for L2 to summarise, so both levels are exhausted on the first
-    over-budget measurement. The request the server would have rejected is never
-    made, and the error names the L3 handoff that would recover and does not exist.
+    One short observation and one turn: L1 has nothing long enough to cut, there
+    is no middle for L2 to summarise, and there is nothing for an L3 brief to
+    fold. All three levels are exhausted on the first over-budget measurement.
+    The request the server would have rejected is never made, and the error says
+    so -- naming the level that declined rather than claiming a handoff that
+    would recover, because at this size no handoff could.
     """
     _requires_tools(endpoint)
 
@@ -554,12 +555,16 @@ async def test_a_window_nothing_can_fit_stops_with_context_overflow(
 
     assert result.stop_reason is StopReason.CONTEXT_OVERFLOW, result.error
     assert result.error is not None
-    assert "l1 and l2" in result.error
-    assert "L3" in result.error
-    assert "not built" in result.error
+    # The ladder reached the bottom and L3 declined it, honestly. "not built" must
+    # not appear: the handoff exists, it just had nothing to work with here.
+    assert "hand off" in result.error
+    assert "not built" not in result.error
+    compactions = _events(result, AgentEventType.COMPACTION)
     assert any(
-        "prompt tokens" in event.text for event in _events(result, AgentEventType.COMPACTION)
-    )
+        event.text.startswith("l1: nothing left to cut; l2: no progress; l3:")
+        for event in compactions
+    ), [event.text for event in compactions]
+    assert any("prompt tokens" in event.text for event in compactions)
     _assert_transcript_is_wellformed(result)
 
 

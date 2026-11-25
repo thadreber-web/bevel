@@ -4,10 +4,11 @@
 the piece every later milestone sits on. Policy (`core/policy/`) now decides every
 tool call, checkpoints (`core/checkpoint/`) snapshot the workspace before the
 first write, the orient step (`core/context/project_map.py`) puts the repo on the
-model's first request, L1/L2 compaction (`core/context/compact.py`) fits an
-over-long transcript back into the window, and the session store
+model's first request, three levels of compaction (`core/context/compact.py`) fit an
+over-long transcript back into the window — L1 truncates, L2 summarises, and L3 hands
+off and continues — and the session store
 (`core/session/`) writes every turn, tool call and usage row through to SQLite as
-the loop goes. The L3 handoff still attaches at the seam named below. The loop stays
+the loop goes. The loop stays
 agnostic of all of them: it asks a `PolicyEvaluator` and records the verdict, without
 knowing what an engine is.
 
@@ -93,7 +94,7 @@ chars/4 estimate, because the target endpoint has no `/tokenize` to predict with
 says so in the `COMPACTION` event: the loop refuses to invent a window size, so it
 does not guess one here either.
 
-`core/context/compact.py` holds the two levels that exist:
+`core/context/compact.py` holds the three levels:
 
 - **L1** cuts tool observations over `MIN_OBSERVATION_CHARS` to head + tail plus a
   pointer. Pure string work — no model call, no I/O, no new dependency, and the same
@@ -107,35 +108,62 @@ does not guess one here either.
   summariser is `Agent(summariser=...)` if one was passed, otherwise the loop's own
   provider — there is no second endpoint in the config, so there is no second endpoint
   here. The `COMPACTION` text names the model that summarised.
+- **L3** is the handoff. It replaces everything before a shorter kept tail — including
+  any L2 summary, which it supersedes — with a head the loop rebuilds in the shape the
+  run opened with: a system prompt carrying a *freshly built* project map, the recall
+  block at index 1, then the brief, then the last `HANDOFF_KEEP_RECENT_TURNS` turns
+  verbatim. It costs a generation and therefore an iteration.
+
+L3 keeps a strictly smaller tail than L2 on purpose. If both kept four turns they
+would run out at exactly the same transcript, L2 would always be exhausted the moment
+L3 was reachable, and escalation could never arrive at a level that helps.
+
+The brief is assembled from three sources, and which is which is the point. The goal
+is the task string verbatim, the files touched come from executions that actually
+mutated the workspace (a call whose arguments will not parse contributes no path — a
+false negative, never an invention), and the todos come from `TodoStore`. Only
+decisions and open questions are the model's own words, embedded verbatim under a
+heading that names them as the previous instance's account. The model is never asked
+to list files, so it cannot invent one.
+
+The brief is not persisted as a turn. `rebuild_transcript` replays every stored row,
+so a stored brief would be replayed alongside all the turns it replaced and a resumed
+run would carry two. It is announced as a `COMPACTION` event instead.
 
 Escalation is cheapest-first and one pass per over-budget measurement, so compaction
-is not a per-iteration tax. A level that changed nothing is exhausted — both levels
-are idempotent, which is what makes "changed nothing" a reliable signal. When L1 and
-L2 are both exhausted the run stops with `StopReason.CONTEXT_OVERFLOW` rather than
-sending a request the server is known to reject; the error names the levels reached,
-the token count, the window, and the L3 handoff that would recover and is not built.
+is not a per-iteration tax. A level that changed nothing is exhausted — all three
+levels are idempotent, which is what makes "changed nothing" a reliable signal. When
+all three are exhausted the run stops with `StopReason.CONTEXT_OVERFLOW` rather than
+sending a request the server is known to reject; the error names the token count, the
+window, and the reason the handoff declined. `MAX_HANDOFFS` caps how many a single run
+may perform, because a model that never converges can otherwise hand off its way
+through the whole token budget while going nowhere; hitting the cap is that same
+reported overflow, not a silent stop.
 
-Both levels cut only at turn-group boundaries and never touch `messages[0]`, the
-system message that carries the project map. A run that silently went unoriented
-after compaction would be worse than one that ran out of context, so the tests assert
-the map is still there after each level.
+L1 and L2 cut only at turn-group boundaries and never touch `messages[0]`, the system
+message that carries the project map. L3 replaces it — with a freshly built one, from
+the same code path the first request used, so a handed-off run is never less oriented
+than a fresh one. A run that silently went unoriented after compaction would be worse
+than one that ran out of context, so the tests assert the map is still there after
+each level.
 
 ## Unbuilt seams
 
 `UNBUILT_SEAMS` is the list of capabilities the loop would use but does not have yet.
-Each is announced as an `AgentEvent` on every run and recorded in the result, and the
-loop never fakes the behaviour it stands in for:
+Each is announced on every run and recorded in the result, and the loop never fakes
+the behaviour it stands in for. **It is currently empty** — every step described in
+this document happens.
 
-| Seam | Arrives with |
-|---|---|
-| L3 compaction — restart the context from the project map, todos and recalled memory | m08d. Its three inputs all exist now (m08a, m09a, m09b); what is missing is composing them into a handoff brief and continuing in a fresh context |
+The list is the mechanism, not its contents. An entry is a disclaimer the model is
+told about and the TUI prints, so a stale entry is a lie about a built feature and a
+missing one is a lie about an unbuilt one. Tests in `tests/unit/test_agent_seams.py`,
+`tests/unit/test_agent_compact.py` and `tests/tui/test_app.py` pin that it is empty,
+which is what makes quietly walking a feature back impossible.
 
-L1 and L2 are **not** in this list: they run, and their `COMPACTION` events carry the
-numbers that prove it. Neither is session persistence: every turn, tool call and
+L1, L2 and L3 are **not** in this list: they run, and their `COMPACTION` events carry
+the numbers that prove it. Neither is session persistence: every turn, tool call and
 usage row a run produces is written through to `sessions.db` as it goes, and
-`core/session/resume.py` rebuilds a closed session from those rows. L3 is absent from
-the code entirely — no function, no enum variant, no placeholder that returns the
-transcript unchanged.
+`core/session/resume.py` rebuilds a closed session from those rows.
 
 ## Sessions
 

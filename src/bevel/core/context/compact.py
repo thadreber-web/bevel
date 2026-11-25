@@ -1,27 +1,37 @@
-"""L1 and L2 compaction: fit an over-long transcript back into the window.
+"""L1, L2 and L3 compaction: fit an over-long transcript back into the window.
 
 The trigger is always the server's own ``prompt_tokens`` against
 ``Capabilities.max_model_len`` — never a chars/4 guess (``docs/provider-notes.md``:
 the target endpoint has no ``/tokenize``, so there is nothing to predict with).
-These two functions therefore decide nothing about budgets. They take a transcript
+These three functions therefore decide nothing about budgets. They take a transcript
 the loop has already measured as too big and hand back a smaller one, plus the
 truth of what they did.
 
 **L1** cuts stale tool observations to head + tail. Pure string work: no model
 call, no I/O, no new dependency, deterministic — the same transcript compacts to
-the same bytes every time. The dropped text is not stored anywhere (session
-persistence is a later slice of m08), so the replacement names the call that
-produced it and tells the model to re-run it.
+the same bytes every time. The dropped text still has a persisted copy in the
+session store, so the replacement names the call that produced it, points at the
+stored session, and tells the model to re-run it.
 
 **L2** replaces the middle of the transcript with one summary and leaves the last
 N turns byte-identical. It costs a generation, which is why the loop tries L1
 first and escalates only when L1 has nothing left to give.
 
-Both levels are **idempotent**: L1 skips text it has already cut, and L2 refuses to
-summarise its own summary. "This level changed nothing" is therefore a reliable
-signal that the level is exhausted, and the loop uses exactly that to escalate —
-and to stop when neither level can help, which is the L3 handoff's job, and L3 is
-not built.
+**L3** is the handoff: it replaces everything before the kept tail — including
+any L2 summary, which it supersedes — with a head the loop supplies. L3 is the
+one level that is not self-contained, and deliberately so. The head is the
+opening shape from ``Agent._seed()``: a system prompt carrying a freshly built
+project map, a recall block, and the brief. The project map lives on disk, the
+recall block in the memory database and the brief in the todo store, so the
+level that composes them cannot be the pure one. ``compact_l3`` is given the
+finished head and does the only thing that needs doing here: cut the transcript
+down to head + kept tail, and refuse if that is not actually smaller.
+
+All three levels are **idempotent**: L1 skips text it has already cut, L2 refuses
+to summarise its own summary, and L3 refuses to hand off a transcript that is
+already a handoff with nothing new to fold in. "This level changed nothing" is
+therefore a reliable signal that the level is exhausted, and the loop uses
+exactly that to escalate — and to stop when no level can help.
 
 The transcript's shape is an invariant, not a nicety: an assistant message that
 asked for tools must stay next to every tool result answering it, or the next
@@ -31,13 +41,22 @@ and never touch ``messages[0]``, the system message that carries the project map
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from typing import Final
 
 from ..messages import Message
 
-__all__ = ["L1Result", "L2Result", "Summarise", "compact_l1", "compact_l2"]
+__all__ = [
+    "L1Result",
+    "L2Result",
+    "L3Result",
+    "Summarise",
+    "compact_l1",
+    "compact_l2",
+    "compact_l3",
+    "handoff_cut",
+]
 
 # An observation this short is already cheaper to keep than to describe.
 MIN_OBSERVATION_CHARS: Final = 1_200
@@ -47,8 +66,15 @@ TAIL_CHARS: Final = 400
 # L2 keeps the last N assistant turns verbatim. Anything older is fair game.
 KEEP_RECENT_TURNS: Final = 4
 
+# L3 keeps fewer. Each rung of the ladder has to be able to do what the rung above
+# it could not: were L3 to keep L2's four turns, the two levels would run out at
+# exactly the same transcript and L3 would be unreachable by escalation. Keeping
+# two means the transcript L2 gives up on at four turns is the one L3 begins from.
+HANDOFF_KEEP_RECENT_TURNS: Final = 2
+
 _TRUNCATED: Final = "[observation truncated by L1 compaction]"
 _SUMMARY_PREFIX: Final = "[summary of earlier turns]"
+_BRIEF_PREFIX: Final = "[handoff brief]"
 
 # L2 asks for a summary through this; the loop supplies it from a ModelProvider.
 Summarise = Callable[[list[Message]], Awaitable[str]]
@@ -215,3 +241,120 @@ def _turn_group_starts(body: list[Message]) -> list[int]:
 
 def _count_turns(middle: list[Message]) -> int:
     return sum(1 for message in middle if message.role == "assistant")
+
+
+def _handoff_split(
+    messages: list[Message],
+) -> tuple[list[Message], list[Message], list[Message]]:
+    """Split into (body, region to hand off, last N turns kept verbatim).
+
+    The tail is ``HANDOFF_KEEP_RECENT_TURNS`` groups, fewer than L2 keeps, and the
+    region is everything above it: the task message, any L2 summary, and the turns
+    older than the tail. A non-empty region always holds at least one assistant
+    turn, because the cut is the start of the second-to-last group.
+    """
+    body = messages[1:] if messages and messages[0].role == "system" else list(messages)
+    starts = _turn_group_starts(body)
+    if len(starts) <= HANDOFF_KEEP_RECENT_TURNS:
+        return body, [], body
+    cut = starts[-HANDOFF_KEEP_RECENT_TURNS]
+    return body, body[:cut], body[cut:]
+
+
+def handoff_cut(messages: list[Message]) -> list[Message]:
+    """The messages L3 would replace, or empty when there is nothing to hand off.
+
+    The loop asks this *before* writing the brief, because the brief has to
+    account for the turns it is about to drop. Empty is the same verdict
+    ``compact_l3`` reaches, so a transcript that is already a handoff and has not
+    grown since never buys a generation to find that out.
+    """
+    _, dropped, _ = _handoff_split(messages)
+    return dropped
+
+
+@dataclass(frozen=True)
+class L3Result:
+    """What L3 did. ``chars_removed`` is 0 when there was nothing to hand off.
+
+    ``reason`` says why nothing was done, in the words the loop puts in front of
+    the user. A level that refused and a level that found no work are the same
+    outcome to the loop and different ones to whoever is reading the log.
+    """
+
+    messages: list[Message]
+    chars_removed: int
+    turns_replaced: int
+    summaries_removed: int
+    brief: str
+    reason: str
+
+    @property
+    def changed(self) -> bool:
+        return self.chars_removed > 0
+
+
+def compact_l3(messages: list[Message], *, head: Sequence[Message], brief: str) -> L3Result:
+    """Replace everything before the kept tail with ``head`` plus the handoff brief.
+
+    ``head`` is the opening shape ``Agent._seed()`` builds — the system prompt
+    with a freshly built project map, then the recall block — and ``brief`` is
+    the structured summary that stands in for the turns being dropped. Both are
+    the loop's to build, because both need things this module must not reach for:
+    the filesystem, the memory database, the todo store, and a generation. The
+    loop checks :func:`handoff_cut` first, so a transcript with nothing to fold
+    in never buys the brief's request.
+
+    Unlike L2, L3 drops the earlier summary rather than keeping it. The summary
+    covered the turns this brief now covers, so keeping both is paying twice for
+    one account — and it is exactly why L3 can fit a transcript L2 could not.
+    The kept tail is the same ``Message`` objects, byte-identical, cut at a
+    turn-group boundary so no tool call is separated from its result.
+
+    If head + brief + tail is not smaller than the transcript the server already
+    measured as too big, the transcript comes back untouched with a reason. The
+    loop must not send a request it knows will be rejected, so a brief that is
+    itself the problem has to be reported rather than shipped.
+    """
+    body = messages[1:] if messages and messages[0].role == "system" else messages
+    starts = _turn_group_starts(body)
+    if len(starts) <= HANDOFF_KEEP_RECENT_TURNS:
+        already = any(_BRIEF_PREFIX in message.content for message in messages)
+        return L3Result(
+            messages,
+            0,
+            0,
+            0,
+            brief,
+            "the transcript is already a handoff with nothing new to fold in"
+            if already
+            else "there are no turns to hand off",
+        )
+
+    cut = starts[-HANDOFF_KEEP_RECENT_TURNS]
+    dropped, tail = body[:cut], body[cut:]
+    brief_message = Message(role="user", content=f"{_BRIEF_PREFIX}\n{brief}")
+    out = [*head, brief_message, *tail]
+    before = sum(len(message.content) for message in messages)
+    after = sum(len(message.content) for message in out)
+    if after >= before:
+        return L3Result(
+            messages,
+            0,
+            0,
+            0,
+            brief,
+            f"the rebuilt transcript is {after} chars against the {before} chars that "
+            "already did not fit",
+        )
+    summaries_removed = sum(1 for message in dropped if message.content.startswith(_SUMMARY_PREFIX))
+    return L3Result(
+        messages=out,
+        chars_removed=before - after,
+        # The superseded summary is not a turn the model took, so it is not counted
+        # as one that was folded into the brief.
+        turns_replaced=_count_turns(dropped) - summaries_removed,
+        summaries_removed=summaries_removed,
+        brief=brief,
+        reason="",
+    )
