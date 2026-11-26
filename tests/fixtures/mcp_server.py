@@ -49,11 +49,14 @@ Flags
     ``--die-now``
         Exit before importing anything beyond ``sys``. Exercises the spawn
         stage: the child is gone before it could have been spoken to.
-    ``--hang {startup,initialize,tools-list,call}``
+    ``--hang {startup,initialize,tools-list,call,resources-list,resources-read}``
         Go silent at a chosen point, staying alive. ``startup`` and
         ``initialize`` both look like "no reply to initialize" from the wire,
         which is precisely why the spawn stage is defined by liveness rather
-        than by a first byte.
+        than by a first byte. The two resources choices are m10f and are
+        reached the same way as the rest -- the handler emits nothing -- so
+        HTTP mode inherits them from ``_run_handlers`` with no HTTP-specific
+        hang to keep in sync.
     ``--exit-after N``
         Read N complete lines, then die without answering the Nth.
     ``--garbage-on-call``
@@ -93,6 +96,20 @@ Flags
         Answer ``echo`` with ``os.getcwd()``. Same reasoning: ``cwd`` is a
         config key, and only the child knows what it was actually started in.
 
+    ``--resources-list {normal,empty,malformed,bare,junk}``
+        Shape of the ``resources/list`` reply (m10f). ``empty`` is an honest
+        zero-length list, ``malformed`` omits the ``resources`` member entirely
+        (which a client that defaults the key reports as "none"), ``bare``
+        carries only a ``uri``, and ``junk`` puts one descriptor with no ``uri``
+        alongside the good one.
+    ``--resources-read {normal,large,blob,error,empty,gone}``
+        Shape of the ``resources/read`` reply (m10f). ``large`` is a resource
+        big enough to force a cap decision, ``blob`` is base64 under
+        ``application/octet-stream``, ``error`` is ``isError: true``, ``empty``
+        omits ``contents``, and ``gone`` advertises ``GONE_URI`` from the list
+        and then refuses to read it -- the case that looks like bevel's bug,
+        because bevel supplied the URI from its own listing.
+
     Both report flags change what ``echo`` *answers*, never what it advertises,
     so the descriptor list stays exactly ``TOOL_NAMES`` and the expectations
     m10b and m10c pin are unaffected.
@@ -106,6 +123,7 @@ handed this process -- reading it is the test, not a dependency on it.
 from __future__ import annotations
 
 import argparse
+import base64
 import json
 import os
 import subprocess
@@ -119,6 +137,18 @@ SERVER_NAME = "bevel-fixture"
 
 RESOURCE_URI = "bevel://fixture/notes"
 RESOURCE_TEXT = "the fixture read this back to you"
+
+#: Advertised by ``--resources-read gone`` and then refused on the read. The
+#: point is that bevel got the URI out of its *own* list, so a bare refusal
+#: looks like bevel's bug rather than the server's.
+GONE_URI = "bevel://fixture/gone"
+#: Served by ``--resources-read blob``. Base64 of this is what goes on the wire;
+#: if it ever reaches a transcript decoded, bevel rendered binary as text.
+BLOB_URI = "bevel://fixture/blob"
+BLOB_SECRET = "SECRET-BINARY-PAYLOAD"
+#: Served by ``--resources-read large``: long enough that whatever cap bevel
+#: applies has to announce itself rather than quietly drop the tail.
+LARGE_TEXT = "abcdefghij" * 10_000
 
 #: Methods this server answers. Anything else is a JSON-RPC method-not-found.
 KNOWN_METHODS = (
@@ -441,9 +471,20 @@ def _answer_tools_call(
     emit({"jsonrpc": "2.0", "id": request_id, "result": result})
 
 
-def _answer_resources_read(request_id: object, params: object) -> None:
+def _resource_descriptor(uri: str, name: str, description: str, mime_type: str) -> dict:
+    return {"uri": uri, "name": name, "description": description, "mimeType": mime_type}
+
+
+def _answer_resources_read(
+    request_id: object, params: object, options: argparse.Namespace
+) -> None:
+    if options.hang == "resources-read":
+        return
     wanted = params.get("uri") if isinstance(params, dict) else None
     if wanted != RESOURCE_URI:
+        # The one refusal every mode shares: a URI this server does not hold.
+        # ``--resources-read gone`` reaches it through a URI it advertised
+        # itself, which is the case that looks like bevel's bug.
         emit(
             {
                 "jsonrpc": "2.0",
@@ -455,34 +496,96 @@ def _answer_resources_read(request_id: object, params: object) -> None:
             }
         )
         return
+    mode = options.resources_read
+    if mode == "empty":
+        # No ``contents`` member at all. A client that reads ``result["contents"]``
+        # optimistically turns this into an empty resource and calls it success.
+        emit({"jsonrpc": "2.0", "id": request_id, "result": {}})
+        return
+    if mode == "error":
+        emit(
+            {
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "result": {
+                    "isError": True,
+                    "contents": [
+                        {
+                            "uri": RESOURCE_URI,
+                            "mimeType": "text/plain",
+                            "text": "the fixture refused to read it",
+                        }
+                    ],
+                },
+            }
+        )
+        return
+    if mode == "blob":
+        emit(
+            {
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "result": {
+                    "contents": [
+                        {
+                            "uri": BLOB_URI,
+                            "mimeType": "application/octet-stream",
+                            "blob": base64.b64encode(BLOB_SECRET.encode("utf-8")).decode("ascii"),
+                        }
+                    ]
+                },
+            }
+        )
+        return
+    text = LARGE_TEXT if mode == "large" else RESOURCE_TEXT
     emit(
         {
             "jsonrpc": "2.0",
             "id": request_id,
             "result": {
-                "contents": [{"uri": RESOURCE_URI, "mimeType": "text/plain", "text": RESOURCE_TEXT}]
+                "contents": [{"uri": RESOURCE_URI, "mimeType": "text/plain", "text": text}]
             },
         }
     )
 
 
-def _answer_resources_list(request_id: object) -> None:
-    emit(
-        {
-            "jsonrpc": "2.0",
-            "id": request_id,
-            "result": {
-                "resources": [
-                    {
-                        "uri": RESOURCE_URI,
-                        "name": "notes",
-                        "description": "The fixture's one resource.",
-                        "mimeType": "text/plain",
-                    }
-                ]
-            },
-        }
-    )
+def _answer_resources_list(request_id: object, options: argparse.Namespace) -> None:
+    if options.hang == "resources-list":
+        return
+    mode = options.resources_list
+    if mode == "empty":
+        emit({"jsonrpc": "2.0", "id": request_id, "result": {"resources": []}})
+        return
+    if mode == "malformed":
+        # A result with no ``resources`` member. Indistinguishable from "none"
+        # to a client that defaults the key, which is the bug this pins.
+        emit({"jsonrpc": "2.0", "id": request_id, "result": {}})
+        return
+    if mode == "bare":
+        emit(
+            {
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "result": {"resources": [{"uri": RESOURCE_URI}]},
+            }
+        )
+        return
+    resources = [
+        _resource_descriptor(
+            RESOURCE_URI, "notes", "The fixture's one resource.", "text/plain"
+        )
+    ]
+    if mode == "junk":
+        # One broken descriptor alongside the good one: no uri at all. The
+        # bridge's rule for tools/list applies here too -- it costs itself.
+        resources.insert(0, {"name": "nameless", "description": "No uri, so unreadable."})
+    if options.resources_read == "gone":
+        # Advertised here and refused on the read, which is the case a model
+        # cannot tell from a bevel bug unless the refusal quotes the URI.
+        resources.append(
+            _resource_descriptor(GONE_URI, "gone", "Advertised, then refused.", "text/plain")
+        )
+    emit({"jsonrpc": "2.0", "id": request_id, "result": {"resources": resources}})
 
 
 def _answer(
@@ -496,9 +599,9 @@ def _answer(
     elif method == "tools/call":
         _answer_tools_call(request_id, params, options, state)
     elif method == "resources/list":
-        _answer_resources_list(request_id)
+        _answer_resources_list(request_id, options)
     elif method == "resources/read":
-        _answer_resources_read(request_id, params)
+        _answer_resources_read(request_id, params, options)
     else:
         emit(
             {
@@ -530,7 +633,17 @@ def _spawn_grandchild(path: str) -> None:
 def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(exit_on_error=False)
     parser.add_argument("--die-now", action="store_true")
-    parser.add_argument("--hang", choices=("startup", "initialize", "tools-list", "call"))
+    parser.add_argument(
+        "--hang",
+        choices=(
+            "startup",
+            "initialize",
+            "tools-list",
+            "call",
+            "resources-list",
+            "resources-read",
+        ),
+    )
     parser.add_argument("--exit-after", type=int)
     parser.add_argument("--garbage-on-call", action="store_true")
     parser.add_argument("--notify", type=int, default=0)
@@ -555,6 +668,18 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         "--report-cwd",
         action="store_true",
         help="echo answers with this process's working directory (m10d).",
+    )
+    parser.add_argument(
+        "--resources-list",
+        choices=("normal", "empty", "malformed", "bare", "junk"),
+        default="normal",
+        help="shape of the resources/list reply (m10f).",
+    )
+    parser.add_argument(
+        "--resources-read",
+        choices=("normal", "large", "blob", "error", "empty", "gone"),
+        default="normal",
+        help="shape of the resources/read reply (m10f).",
     )
     parser.add_argument("--http", action="store_true", help="serve streamable-HTTP, not stdio.")
     parser.add_argument(
