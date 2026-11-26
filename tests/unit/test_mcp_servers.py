@@ -26,7 +26,6 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from bevel.mcp.servers import McpServers, start_servers
 
 from bevel.config.schema import McpServerConfig
 from bevel.core.agent import Agent
@@ -34,6 +33,7 @@ from bevel.core.policy import allow_all_policy
 from bevel.core.tools import registry
 from bevel.core.tools.base import ToolContext, call_tool
 from bevel.mcp import servers as servers_module
+from bevel.mcp.servers import McpServers, start_servers
 from bevel.providers.mock import MockProvider, ScriptedTurn
 
 FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "mcp_server.py"
