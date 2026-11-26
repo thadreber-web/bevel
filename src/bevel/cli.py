@@ -392,7 +392,8 @@ def _mcp_list(out: IO[str], err: IO[str]) -> int:
         out.write(
             "bevel mcp list: no MCP servers configured.\n"
             "  Add a [mcp.servers.<name>] table to bevel.toml or ~/.config/bevel/config.toml;\n"
-            "  'command' is the only required key. See bevel.toml.example for every key.\n"
+            "  each one declares exactly one of 'command' (a process bevel spawns) or 'url'\n"
+            "  (a streamable-HTTP endpoint). See bevel.toml.example for every key.\n"
         )
         return 0
 

@@ -51,7 +51,7 @@ _POLICY_MODES = tuple(mode.value for mode in PolicyMode)
 _MEMORY_KEYS = frozenset({"enabled", "vectors", "auto_accept", "limit", "max_injection_tokens"})
 
 _MCP_KEYS = frozenset({"servers"})
-_MCP_SERVER_KEYS = frozenset({"command", "args", "env", "cwd", "enabled", "timeout"})
+_MCP_SERVER_KEYS = frozenset({"command", "url", "args", "env", "cwd", "enabled", "timeout"})
 
 #: A server name becomes the tool prefix (``fs__read``) and the handle in
 #: ``bevel mcp list``, so it has to survive both without sanitising.
@@ -371,11 +371,24 @@ def _validated_server(  # noqa: PLR0912 - one branch per configured key
     """
     out: dict[str, Any] = {}
     command = raw.get("command")
-    if command is None:
-        raise ConfigError(f"{path}: mcp.servers.{name} command is required")
-    if not isinstance(command, str) or not command.strip():
-        raise ConfigError(f"{path}: mcp.servers.{name} command must be a non-empty string")
-    out["command"] = command
+    url = raw.get("url")
+    if command is not None and url is not None:
+        raise ConfigError(
+            f"{path}: mcp.servers.{name} declares both command and url; a server is either a "
+            "process bevel spawns or an endpoint bevel speaks to, not both"
+        )
+    if command is None and url is None:
+        raise ConfigError(f"{path}: mcp.servers.{name} must declare exactly one of command or url")
+    if command is not None:
+        if not isinstance(command, str) or not command.strip():
+            raise ConfigError(f"{path}: mcp.servers.{name} command must be a non-empty string")
+        out["command"] = command
+    else:
+        if not isinstance(url, str) or not url.strip():
+            raise ConfigError(f"{path}: mcp.servers.{name} url must be a non-empty string")
+        if not url.startswith(("http://", "https://")):
+            raise ConfigError(f"{path}: mcp.servers.{name} url must start with http:// or https://")
+        out["url"] = url
 
     if "args" in raw:
         args = raw["args"]

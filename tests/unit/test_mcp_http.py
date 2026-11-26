@@ -59,6 +59,7 @@ async def start_fixture(
     argv = [sys.executable, str(FIXTURE), "--http", "--port-file", str(port_file), *flags]
     proc = await asyncio.create_subprocess_exec(
         *argv,
+        cwd=str(tmp_path),
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
@@ -83,7 +84,7 @@ async def _wait_for_port(port_file: Path, proc: asyncio.subprocess.Process) -> N
     """
     deadline = asyncio.get_running_loop().time() + 15.0
     while asyncio.get_running_loop().time() < deadline:
-        if port_file.exists() and port_file.read_text(encoding="utf-8").strip():
+        if port_file.exists() and port_file.read_text(encoding="utf-8").strip():  # noqa: ASYNC240 - a few bytes in a local temp file
             return
         if proc.returncode is not None:
             raise AssertionError(f"fixture exited early with {proc.returncode}")
@@ -169,11 +170,16 @@ async def test_the_session_id_is_replayed_on_every_request_after_initialize(
         await transport.start()
         await transport.call("tools/list")
         await transport.call("tools/call", {"name": "methods", "arguments": {}})
-        observations = saw(tmp_path)
-        issued = observations["session_issued"]
-        assert isinstance(issued, str) and issued
-        assert observations["session_ids_presented"] == [issued, issued], (
-            "every request after initialize must carry the negotiated session id"
+        presented = saw(tmp_path)["session_ids_presented"]
+        issued = saw(tmp_path)["session_issued"]
+        assert isinstance(issued, str), "the fixture issued no session id"
+        assert issued
+        # The handshake's own tools/list is in here too, which is the point: the
+        # very first request after initialize already has to carry it.
+        assert presented, "no request after initialize was recorded"
+        assert all(value == issued for value in presented), (
+            "every request after initialize must carry the negotiated session id, "
+            f"got {presented!r} against {issued!r}"
         )
     finally:
         await stop_fixture(transport, proc)
@@ -221,6 +227,7 @@ async def test_close_ends_the_session_with_delete(tmp_path: Path) -> None:
     finally:
         await stop_fixture(transport, proc)
 
+
 # ---------------------------------------------------------------------------
 # Headers the specification makes mandatory.
 # ---------------------------------------------------------------------------
@@ -252,13 +259,23 @@ async def test_the_protocol_version_header_is_sent_after_the_negotiation(
 
 async def test_configured_extra_headers_are_sent(tmp_path: Path) -> None:
     transport, proc = await start_fixture(
-        tmp_path, "--require-header", "x-api-key=sekret", "--saw", "saw.json"
+        tmp_path,
+        "--require-header",
+        "x-api-key=sekret",
+        "--saw",
+        "saw.json",
+        headers={"x-api-key": "sekret"},
     )
     try:
         await transport.start()
         result = await transport.call("tools/call", {"name": "echo", "arguments": {"text": "ok"}})
         assert result["content"][0]["text"] == "ok"
-        assert saw(tmp_path)["headers_seen"] == ["sekret"]
+        seen = saw(tmp_path)["headers_seen"]
+        # Every request, not just the one the test made: the handshake's own
+        # requests go through the same header builder, and a header that appears
+        # only on some of them is a header the transport forgot to make mandatory.
+        assert seen, "the fixture recorded no values for the configured header"
+        assert all(value == "sekret" for value in seen), seen
     finally:
         await stop_fixture(transport, proc)
 
@@ -382,8 +399,12 @@ async def test_a_hanging_call_names_the_method(tmp_path: Path) -> None:
 
 
 async def test_a_refused_connection_is_a_typed_transport_error() -> None:
-    # Port 1 is not listening on 127.0.0.1 and never will be.
-    transport = HttpTransport("http://127.0.0.1:1", handshake_timeout=2.0, call_timeout=2.0)
+    # Port 1 is not listening on 127.0.0.1 and never will be. The budget has to
+    # clear Windows' ~2 s loopback drop: nothing is listening, so the stack gets
+    # no RST back and reports the failure only once its own connect attempt times
+    # out. A 2 s budget here would lose that race and report a handshake timeout
+    # instead of the connect error under test.
+    transport = HttpTransport("http://127.0.0.1:1", handshake_timeout=15.0, call_timeout=15.0)
     with pytest.raises(McpConnectError) as excinfo:
         await transport.start()
     assert isinstance(excinfo.value, McpTransportError)
@@ -426,4 +447,3 @@ async def test_a_server_that_dies_mid_call_reports_a_closed_stream(tmp_path: Pat
             await transport.call("tools/call", {"name": "echo", "arguments": {"text": "x"}})
     finally:
         await stop_fixture(transport, proc)
-

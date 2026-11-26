@@ -593,6 +593,51 @@ class TestMcpServersTable:
         assert server.enabled is True
         assert server.timeout == 30.0
 
+    def test_a_server_can_be_declared_by_url_instead_of_command(self, cwd: Path) -> None:
+        """m10e: a remote server has no argv, so ``url`` stands in for ``command``."""
+        write(
+            cwd / PROJECT_FILENAME,
+            with_servers(
+                mcp_table(
+                    "remote",
+                    url=toml_str("https://mcp.test/rpc"),
+                    env="{TOKEN = 'secret'}",
+                    timeout="4.5",
+                )
+            ),
+        )
+        server = load(cwd=cwd, env={}).mcp_servers["remote"]
+        assert server.url == "https://mcp.test/rpc"
+        assert server.command is None
+        assert server.args == ()
+        assert server.env == {"TOKEN": "secret"}
+        assert server.cwd is None
+        assert server.enabled is True
+        assert server.timeout == 4.5
+
+    def test_command_and_url_are_mutually_exclusive(self, cwd: Path) -> None:
+        """A table declaring both has no defined meaning; refusing it beats picking one."""
+        write(
+            cwd / PROJECT_FILENAME,
+            with_servers(
+                mcp_table("a", command=toml_str("srv"), url=toml_str("https://mcp.test/rpc"))
+            ),
+        )
+        with pytest.raises(ConfigError, match="declares both command and url"):
+            load(cwd=cwd, env={})
+
+    def test_a_stdio_and_an_http_server_can_be_configured_together(self, cwd: Path) -> None:
+        write(
+            cwd / PROJECT_FILENAME,
+            with_servers(
+                mcp_table("local", command=toml_str("one")),
+                mcp_table("remote", url=toml_str("https://mcp.test/rpc")),
+            ),
+        )
+        servers = load(cwd=cwd, env={}).mcp_servers
+        assert servers["local"].command == "one"
+        assert servers["remote"].url == "https://mcp.test/rpc"
+
     def test_several_servers_are_all_kept(self, cwd: Path) -> None:
         write(
             cwd / PROJECT_FILENAME,
@@ -655,7 +700,7 @@ class TestMcpServersTable:
         assert "mcp.servers.a" in message
         assert "nonsense" in message
 
-    @pytest.mark.parametrize("key", ["command", "args", "env", "cwd", "enabled", "timeout"])
+    @pytest.mark.parametrize("key", ["command", "args", "env", "cwd", "enabled", "timeout", "url"])
     def test_every_key_is_documented_in_the_example(self, key: str) -> None:
         """The example file is the only place a key is explained; an undocumented key is
         a key nobody finds."""
@@ -666,7 +711,6 @@ class TestMcpServersTable:
     @pytest.mark.parametrize(
         ("body", "expected"),
         [
-            (mcp_table("a"), r"command is required"),
             (mcp_table("a", command="''"), r"command must be a non-empty string"),
             (mcp_table("a", command="'c'", command2="'d'"), "command2"),
             (mcp_table("a", command="'c'", args="'not a list'"), r"args must be a list of strings"),
@@ -679,6 +723,15 @@ class TestMcpServersTable:
             (mcp_table("a", command="'c'", timeout="0"), r"timeout must be a positive number"),
             (mcp_table("a", command="'c'", timeout="-1"), r"timeout must be a positive number"),
             (mcp_table("a", command="'c'", timeout="true"), r"timeout must be a positive number"),
+            (mcp_table("a"), r"exactly one of command or url"),
+            (mcp_table("a", url="''"), r"url must be a non-empty string"),
+            (mcp_table("a", url="1"), r"url must be a non-empty string"),
+            (mcp_table("a", url="'   '"), r"url must be a non-empty string"),
+            (mcp_table("a", url="'mcp.test/rpc'"), r"url must start with http:// or https://"),
+            (
+                mcp_table("a", url="'ftp://mcp.test/rpc'"),
+                r"url must start with http:// or https://",
+            ),
         ],
     )
     def test_malformed_values_are_rejected(self, cwd: Path, body: str, expected: str) -> None:

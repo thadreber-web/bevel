@@ -1,6 +1,6 @@
 """Model Context Protocol client.
 
-What exists today is the wire, one way to carry it, the bridge that turns a
+What exists today is the wire, two ways to carry it, the bridge that turns a
 server's advertised tools into tools the model is offered, and the layer that
 starts configured servers and stops them again.
 :mod:`bevel.mcp.jsonrpc` is the JSON-RPC 2.0 core (m10a): request, notification
@@ -54,10 +54,12 @@ stays the source of truth for built-ins only.
 
 :mod:`bevel.mcp.servers` is m10d, the seam between configuration and the wire.
 :func:`~bevel.mcp.servers.start_servers` takes the ``[mcp.servers.<name>]``
-tables the loader produced and owns everything about them from there: it spawns
-each enabled server by argv, handshakes it, bridges it, and hands back
-:attr:`~bevel.mcp.servers.McpServers.tools` to pass to ``Agent(tools=...)`` plus
-one :class:`~bevel.mcp.servers.ServerReport` per configured server. Two rules
+tables the loader produced and owns everything about them from there: it brings
+up each enabled server -- a child process by argv for a ``command`` table, a
+streamable-HTTP session for a ``url`` one -- handshakes it, bridges it, and
+hands back :attr:`~bevel.mcp.servers.McpServers.tools` to pass to
+``Agent(tools=...)`` plus one :class:`~bevel.mcp.servers.ServerReport` per
+configured server. Two rules
 make it a module rather than a loop. A server that cannot start is *data*: its
 report says so, quoting the transport's own message with the stage that failed
 and the tail of the server's stderr, and the other servers still come up -- a
@@ -71,12 +73,32 @@ The TUI starts servers per run and closes them in a ``finally``; ``bevel mcp
 list`` starts them, prints the reports, and closes them again, and never prints
 an ``env`` value.
 
+:mod:`bevel.mcp.http` is m10e, the second transport: streamable-HTTP over
+``httpx``, which was already a runtime dependency, so this added nothing to
+install. :class:`~bevel.mcp.http.HttpTransport` implements the same two-method
+:class:`~bevel.mcp.jsonrpc.DuplexStream` stdio does, so the pairing layer is
+shared rather than forked -- this module imports the channel, not a variant of
+it. One ``POST`` per JSON-RPC message with ``Accept`` offering both
+``application/json`` and ``text/event-stream``; the ``Mcp-Session-Id`` from the
+``initialize`` response replayed verbatim on every later request;
+``MCP-Protocol-Version`` sent once the two ends have agreed on one; a response
+body read as either a JSON document or an SSE stream and carved into the same
+``bytes`` frames stdio's pipe produces; ``DELETE`` on close. Unlike stdio there
+is no reader task, because an HTTP reply is the body of the request just sent
+and httpx drains the socket as it arrives, so the POST completes inside
+``write_frame`` and there is no buffer to keep emptying. It never retries: a
+dropped session (``404``) is :class:`~bevel.mcp.http.McpSessionExpiredError` and
+a failed call is a failed call, because silently re-sending a ``tools/call``
+would run the tool a second time. Its ``stderr_tail`` is the tail of the last
+error response body, which is what makes the bridge's error messages work the
+same for both transports. Resumability and the server-initiated ``GET`` stream
+are not implemented, and the module docstring says so and why. It is tested
+against the same fixture driven with ``--http``, which enforces the header rules
+by *refusing* non-compliant requests rather than echoing them; see
+``tests/unit/test_mcp_http.py``.
+
 What does not exist yet, and the slice that delivers each:
 
-``http.py``
-    m10e -- streamable-HTTP transport, session ids and SSE. It implements the
-    same two-method :class:`~bevel.mcp.jsonrpc.DuplexStream`, so the channel and
-    every fixture-driven expectation above carry over.
 ``resources.py``
     m10f -- ``resources/list`` and ``resources/read``, plus the two
     model-facing tools that actually put a fetched resource in front of the

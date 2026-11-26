@@ -20,7 +20,9 @@ started must be gone when :meth:`McpServers.aclose` returns.
 
 from __future__ import annotations
 
+import asyncio
 import os
+import socket
 import sys
 from pathlib import Path
 from typing import Any
@@ -412,3 +414,203 @@ async def test_a_refused_descriptor_is_reported_and_costs_only_itself() -> None:
         assert servers.tools, "refusals must not take the working tools with them"
     finally:
         await servers.aclose()
+
+
+# ---------------------------------------------------------------------------
+# m10e: the same lifecycle, driven by ``url`` instead of ``command``.
+# ---------------------------------------------------------------------------
+
+
+async def _started_http(
+    tmp_path: Path, *flags: str, name: str = "remote"
+) -> tuple[McpServers, asyncio.subprocess.Process]:
+    """Start the fixture in HTTP mode and bring up one server pointed at it.
+
+    The fixture is spawned by the test but the *transport* is built by
+    :func:`start_servers` from a config holding only ``url`` -- which is the
+    wiring this slice adds, and the reason the server is not started through a
+    transport the test made itself.
+    """
+    port_file = tmp_path / "port"
+    proc = await asyncio.create_subprocess_exec(
+        sys.executable,
+        str(FIXTURE),
+        "--http",
+        "--port-file",
+        str(port_file),
+        *flags,
+        cwd=str(tmp_path),
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        await _wait_for_port(port_file, proc)
+    except BaseException:
+        proc.kill()
+        await proc.wait()
+        raise
+    url = f"http://127.0.0.1:{port_file.read_text(encoding='utf-8').strip()}"
+    servers = await start_servers({name: McpServerConfig(url=url, timeout=15.0)})
+    return servers, proc
+
+
+async def _wait_for_port(port_file: Path, proc: asyncio.subprocess.Process) -> None:
+    """Wait for the fixture to publish the ephemeral port it bound."""
+    deadline = asyncio.get_running_loop().time() + 15.0
+    while asyncio.get_running_loop().time() < deadline:
+        if port_file.exists() and port_file.read_text(encoding="utf-8").strip():  # noqa: ASYNC240 - a few bytes in a local temp file
+            return
+        if proc.returncode is not None:
+            raise AssertionError(f"the fixture exited early with {proc.returncode}")
+        await asyncio.sleep(0.02)
+    raise AssertionError(f"the fixture never wrote {port_file}")
+
+
+async def test_a_server_declared_by_url_is_handshaked_and_bridged(tmp_path: Path) -> None:
+    servers, proc = await _started_http(tmp_path)
+    try:
+        report = servers.reports[0]
+        assert report.name == "remote"
+        assert report.handshook is True
+        assert report.error is None
+        assert "remote__echo" in report.tools
+        assert report.command == (report.command[0],)
+        assert report.command[0].startswith("http://127.0.0.1:"), (
+            "an HTTP server is identified by the URL, not by an argv"
+        )
+        assert report.pid is None, "a remote server is not our child"
+        result = await _call(servers, "remote__echo", text="over http")
+        assert result.ok, result.content
+        assert "over http" in result.content
+    finally:
+        await servers.aclose()
+        proc.kill()
+        await proc.wait()
+
+
+async def test_a_url_server_and_a_command_server_start_together(tmp_path: Path) -> None:
+    """The mixed config is the realistic one, and it must not pick a favourite."""
+    port_file = tmp_path / "port"
+    proc = await asyncio.create_subprocess_exec(
+        sys.executable,
+        str(FIXTURE),
+        "--http",
+        "--port-file",
+        str(port_file),
+        cwd=str(tmp_path),
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        await _wait_for_port(port_file, proc)
+        url = f"http://127.0.0.1:{port_file.read_text(encoding='utf-8').strip()}"
+        servers = await start_servers(
+            {"local": fixture_config(), "remote": McpServerConfig(url=url, timeout=15.0)}
+        )
+        try:
+            assert [report.name for report in servers.reports] == ["local", "remote"]
+            assert [report.handshook for report in servers.reports] == [True, True]
+            assert [tool.spec.name for tool in servers.tools] == [
+                "local__echo",
+                "local__boom",
+                "local__methods",
+                "local__read_note",
+                "remote__echo",
+                "remote__boom",
+                "remote__methods",
+                "remote__read_note",
+            ]
+        finally:
+            await servers.aclose()
+    finally:
+        proc.kill()
+        await proc.wait()
+
+
+async def test_a_url_that_answers_nothing_is_reported_and_costs_nothing(tmp_path: Path) -> None:
+    """A dead URL is data, not an exception -- the same rule as a bad ``command``.
+
+    The port is bound by a socket nobody accepts on, which is what "the server
+    is not there" looks like from a client that already resolved the name.
+    """
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(0)
+    port = listener.getsockname()[1]
+    listener.close()
+    servers = await start_servers(
+        {"gone": McpServerConfig(url=f"http://127.0.0.1:{port}", timeout=15.0)}
+    )
+    try:
+        report = servers.reports[0]
+        assert report.handshook is False
+        assert report.enabled is True
+        assert report.error is not None
+        assert "gone" in report.error, "the message must name which server failed"
+        assert servers.tools == ()
+    finally:
+        await servers.aclose()
+
+
+async def test_aclose_on_a_url_server_leaves_the_server_running(tmp_path: Path) -> None:
+    """Closing our side must not touch a process we did not start.
+
+    The stdio guarantee is "the child is dead". The HTTP guarantee is the
+    opposite one, and it is just as much a leak if it is broken: killing
+    something the user did not ask bevel to own would be far worse than leaving
+    it up.
+    """
+    servers, proc = await _started_http(tmp_path)
+    await servers.aclose()
+    assert proc.returncode is None, "bevel killed a server it did not spawn"
+    proc.kill()
+    await proc.wait()
+
+
+async def test_aclose_is_idempotent_and_total_across_both_transports(tmp_path: Path) -> None:
+    """One ``aclose`` must clean up a mixed set, and survive being called twice."""
+    port_file = tmp_path / "port"
+    proc = await asyncio.create_subprocess_exec(
+        sys.executable,
+        str(FIXTURE),
+        "--http",
+        "--port-file",
+        str(port_file),
+        cwd=str(tmp_path),
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        await _wait_for_port(port_file, proc)
+        url = f"http://127.0.0.1:{port_file.read_text(encoding='utf-8').strip()}"
+        servers = await start_servers(
+            {"local": fixture_config(), "remote": McpServerConfig(url=url, timeout=15.0)}
+        )
+        pid = servers.reports[0].pid
+        assert pid is not None
+        await servers.aclose()
+        await servers.aclose()
+        assert not _process_alive(pid)
+    finally:
+        proc.kill()
+        await proc.wait()
+
+
+async def test_a_disabled_url_server_is_never_connected_to(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``enabled = false`` means no request either, not a request that is ignored."""
+    constructed: list[str] = []
+
+    class NeverConnected:
+        def __init__(self, url: str, **_kwargs: object) -> None:
+            constructed.append(url)
+
+    monkeypatch.setattr(servers_module, "HttpTransport", NeverConnected)
+    servers = await start_servers(
+        {"off": McpServerConfig(url="https://gone.test/rpc", enabled=False)}
+    )
+    assert constructed == [], "a disabled server was connected to anyway"
+    assert servers.reports[0].enabled is False
+    assert servers.reports[0].command == ("https://gone.test/rpc",)
+    await servers.aclose()

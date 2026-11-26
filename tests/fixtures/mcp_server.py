@@ -1,15 +1,49 @@
-"""A real stdio MCP server, and the oracle every m10 slice tests against.
+"""A real MCP server, and the oracle every m10 slice tests against.
 
 This is not a test module and must never import pytest. It is a plain script
 runnable as ``[sys.executable, "tests/fixtures/mcp_server.py", ...]``, which is
 how :mod:`bevel.mcp.stdio` spawns it in ``tests/unit/test_mcp_stdio.py`` and how
-every later m10 slice will spawn it too. m10a could prove pairing in memory;
-nothing after m10b can be believed unless it is proven against a process that
-actually holds a pipe.
+:mod:`bevel.mcp.http` drives it in ``tests/unit/test_mcp_http.py`` with
+``--http``. m10a could prove pairing in memory; nothing after m10b can be
+believed unless it is proven against a process that actually holds a pipe, or
+actually answers a socket.
+
+Both transports answer from the *same* ``_answer_*`` handlers. A frame arrives,
+the handler runs, and whatever it emits is collected; stdio writes the
+collection to stdout one line at a time, HTTP puts it in a response body. That
+shared core is the point: a bug that only appears on one transport is a
+transport bug, and it can only be found if the other transport is not a
+separately-written imitation of it.
 
 Everything a test needs to misbehave is a flag, so the failure mode lives in
 the server rather than in a monkeypatch of the client. A transport bug and a
 test-double bug look identical; only a real child can tell them apart.
+
+HTTP mode
+    ``--http`` serves the streamable-HTTP transport on ``127.0.0.1`` with an
+    ephemeral port, which it writes to the file named by ``--port-file`` once
+    it is listening. A fixed port would race with whatever else happens to be
+    free, so the server says which one it got.
+
+    The header rules the specification makes mandatory are enforced, not
+    echoed. ``--require-accept`` answers 400 unless ``Accept`` lists both
+    ``application/json`` and ``text/event-stream``; ``--require-protocol-header``
+    answers 400 unless ``MCP-Protocol-Version`` matches the version negotiated
+    at ``initialize``; ``--require-header NAME=VALUE`` answers 400 unless that
+    header is present with that value. An echo would be satisfied by a client
+    that sends the header only when convenient; a refusal will not be.
+
+    ``--no-session`` withholds ``Mcp-Session-Id`` entirely, because the
+    specification makes a session optional and a client that assumes one is
+    untestable against a server that always issues it. ``--bad-session-after N``
+    answers N requests after ``initialize`` and then 404s every later one, which
+    is how a client gets caught silently retrying a ``tools/call``.
+
+    ``--sse`` answers requests with ``text/event-stream`` instead of
+    ``application/json``, one SSE event per JSON-RPC message, so both shapes the
+    client must support are reachable. ``--saw FILE`` records what the server
+    actually received; "the client replayed the session id on every request" has
+    no witness but the server.
 
 Flags
     ``--die-now``
@@ -76,7 +110,9 @@ import json
 import os
 import subprocess
 import sys
+import threading
 import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 PROTOCOL_VERSION = "2025-06-18"
 SERVER_NAME = "bevel-fixture"
@@ -121,6 +157,16 @@ _HEARTBEAT_CODE = (
 )
 
 
+#: The thread's output sink. ``None`` means stdout, which is what stdio mode
+#: uses. HTTP mode points it at a list so the ``_answer_*`` handlers can answer a
+#: POST without knowing they are answering a POST: a frame arrives, the handler
+#: runs, whatever it emits is collected, and the transport decides how to deliver
+#: it. Thread-local because ``ThreadingHTTPServer`` answers concurrent requests
+#: concurrently, and two interleaved replies in one list would be a fixture bug
+#: indistinguishable from a client bug.
+_sink = threading.local()
+
+
 def emit(payload: object) -> None:
     """Write one JSON-RPC frame: one line, delimiter included, flushed."""
     write_raw(json.dumps(payload) + "\n")
@@ -133,6 +179,10 @@ def write_raw(text: str) -> None:
     "half a frame" and "two frames in one write", and a line-buffered text
     stream would silently rewrite both.
     """
+    collected = getattr(_sink, "lines", None)
+    if collected is not None:
+        collected.append(text)
+        return
     sys.stdout.buffer.write(text.encode("utf-8"))
     sys.stdout.buffer.flush()
 
@@ -506,6 +556,47 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         action="store_true",
         help="echo answers with this process's working directory (m10d).",
     )
+    parser.add_argument("--http", action="store_true", help="serve streamable-HTTP, not stdio.")
+    parser.add_argument(
+        "--port-file",
+        help="with --http: write the bound port here once listening (required).",
+    )
+    parser.add_argument(
+        "--sse",
+        action="store_true",
+        help="with --http: answer requests with text/event-stream instead of application/json.",
+    )
+    parser.add_argument(
+        "--no-session",
+        action="store_true",
+        help="with --http: never issue an Mcp-Session-Id.",
+    )
+    parser.add_argument(
+        "--bad-session-after",
+        type=int,
+        metavar="N",
+        help="with --http: answer N requests after initialize, then 404 every later one.",
+    )
+    parser.add_argument(
+        "--require-accept",
+        action="store_true",
+        help="with --http: 400 unless Accept lists both application/json and text/event-stream.",
+    )
+    parser.add_argument(
+        "--require-protocol-header",
+        action="store_true",
+        help="with --http: 400 unless MCP-Protocol-Version matches the negotiated version.",
+    )
+    parser.add_argument(
+        "--require-header",
+        metavar="NAME=VALUE",
+        help="with --http: 400 unless that header is present with that value.",
+    )
+    parser.add_argument(
+        "--saw",
+        metavar="FILE",
+        help="with --http: record what the server actually received, as JSON, after each request.",
+    )
     return parser.parse_args(argv)
 
 
@@ -568,6 +659,295 @@ def _decode(line: bytes) -> dict | None:
     return frame
 
 
+# ---------------------------------------------------------------------------
+# Streamable-HTTP mode (m10e).
+# ---------------------------------------------------------------------------
+
+
+class _HttpServer:
+    """Everything the handler needs that is not a flag.
+
+    A plain object rather than handler attributes because ``ThreadingHTTPServer``
+    answers requests on separate threads and the session, the counters, and the
+    observations are shared across them.
+    """
+
+    def __init__(self, options: argparse.Namespace) -> None:
+        self.options = options
+        self.lock = threading.Lock()
+        self.session_id: str | None = None
+        self.negotiated: str | None = None
+        self.initialize_had_session_id = False
+        self.session_ids_presented: list[str | None] = []
+        self.headers_seen: list[str] = []
+        self.deletes = 0
+        self.answered_after_initialize = 0
+        self.state = {
+            "methods": [],
+            "grandchild_started": False,
+            "garbage_sent": False,
+            "read": 0,
+        }
+
+    def record(self) -> None:
+        """Write what the server has received so far, if ``--saw`` asked for it."""
+        if not self.options.saw:
+            return
+        with self.lock:
+            payload = {
+                "session_issued": self.session_id,
+                "initialize_had_session_id": self.initialize_had_session_id,
+                "session_ids_presented": list(self.session_ids_presented),
+                "headers_seen": list(self.headers_seen),
+                "deletes": self.deletes,
+                "methods": list(self.state["methods"]),
+            }
+        # Written whole, and read whole by the test after a call returns, so the
+        # last request's record is the one that lands.
+        with open(self.options.saw, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle)
+
+
+class _Server(ThreadingHTTPServer):
+    """The threading server, with the fixture's context carried on it.
+
+    ``ThreadingHTTPServer`` builds a handler per request and passes it no
+    application state, so the context rides on the server every handler is
+    handed. A subclass for one attribute beats a module global that each handler
+    has to assert on.
+    """
+
+    daemon_threads = True
+    ctx: _HttpServer
+
+
+class _Handler(BaseHTTPRequestHandler):
+    """One MCP endpoint speaking streamable-HTTP.
+
+    ``protocol_version`` is 1.1 so httpx's connection reuse works; every response
+    sets ``Content-Length`` accordingly, and the ones that end a stream say
+    ``Connection: close`` so the client does not wait for a next response that is
+    never coming.
+    """
+
+    protocol_version = "HTTP/1.1"
+    server_version = "bevel-fixture/1.0"
+
+    def do_POST(self) -> None:
+        """Handle one JSON-RPC message, which the spec says is one POST."""
+        ctx = self.server.ctx  # type: ignore[attr-defined]
+        options = ctx.options
+        body = self.rfile.read(int(self.headers.get("Content-Length", "0") or "0"))
+
+        frame = _decode(body)
+        if frame is None:
+            self._reply(400, b'{"jsonrpc":"2.0","error":{"code":-32700,"message":"bad json"}}')
+            return
+        method = frame.get("method")
+        if not isinstance(method, str) or not method:
+            log(f"fixture received an HTTP frame with no method: {body[:120]!r}")
+            self._reply(400, b'{"jsonrpc":"2.0","error":{"code":-32600,"message":"no method"}}')
+            return
+
+        # Bookkeeping first, and the refusals after it: a request the server
+        # rejects is still a request the client sent, and --saw has to show it.
+        is_request = "id" in frame
+        with ctx.lock:
+            ctx.state["methods"].append(method)
+            ctx.state["read"] += 1
+            if is_request and method != "initialize":
+                ctx.session_ids_presented.append(self.headers.get("Mcp-Session-Id"))
+            past_limit = (
+                ctx.options.exit_after is not None and ctx.state["read"] > ctx.options.exit_after
+            )
+        if past_limit:
+            log("fixture exiting without answering")
+            os._exit(0)
+
+        refusal = self._refusal(options, ctx, method, is_request)
+        if refusal is not None:
+            ctx.record()
+            self._reply(*refusal)
+            return
+
+        if not is_request:
+            # A notification: accepted, and answered with 202 and no body, which is
+            # what the spec demands. Answering it would be the protocol violation.
+            ctx.record()
+            self._reply(202, b"")
+            return
+
+        if method == "initialize" and not options.no_session:
+            with ctx.lock:
+                ctx.session_id = f"fixture-session-{os.getpid()}"
+
+        lines = self._run_handlers(method, frame["id"], frame.get("params"), options, ctx)
+        if lines is None:
+            # A hang flag produced nothing. Block rather than answer: from the
+            # client's side this must be indistinguishable from a server that is
+            # alive and thinking, which is the whole point of --hang.
+            while True:
+                time.sleep(3600)
+
+        with ctx.lock:
+            if method != "initialize":
+                ctx.answered_after_initialize += 1
+            session_for_reply = ctx.session_id if method == "initialize" else None
+        ctx.record()
+
+        if options.sse:
+            self._reply_sse(lines, session_id=session_for_reply)
+        else:
+            extra = {"Mcp-Session-Id": session_for_reply} if session_for_reply else {}
+            self._reply(200, "".join(lines).encode("utf-8"), "application/json", extra)
+
+    def do_DELETE(self) -> None:
+        """End the session. A client that is finished SHOULD send this."""
+        ctx = self.server.ctx  # type: ignore[attr-defined]
+        with ctx.lock:
+            ctx.deletes += 1
+        ctx.record()
+        self._reply(200, b"")
+
+    def do_GET(self) -> None:
+        """No server-initiated stream. 405 is the spec's answer for that."""
+        self._reply(405, b"")
+
+    def log_message(self, format: str, *args: object) -> None:
+        """Silence the access log; stderr is the fixture's own to write to."""
+
+    # --- internals ----------------------------------------------------------
+
+    def _refusal(  # noqa: PLR0911 - one return per mandatory rule the spec states
+        self, options: argparse.Namespace, ctx: _HttpServer, method: str, is_request: bool
+    ) -> tuple[int, bytes] | None:
+        """The status the spec requires for a request that broke a mandatory rule.
+
+        Enforced rather than echoed: a client that sends ``Accept`` only when it
+        remembers, or ``MCP-Protocol-Version`` only after the first call, passes an
+        echo and fails here.
+        """
+        if options.require_accept:
+            accept = self.headers.get("Accept", "")
+            if "application/json" not in accept or "text/event-stream" not in accept:
+                return 400, f'{{"error":"Accept must list both types, got {accept!r}"}}'.encode()
+        if options.require_protocol_header and method != "initialize":
+            # The spec only mandates this header on requests after the negotiation;
+            # on initialize the version is still being chosen, so requiring it there
+            # would be the fixture demanding knowledge the client cannot have.
+            wanted = options.protocol
+            got = self.headers.get("MCP-Protocol-Version")
+            if got != wanted:
+                return 400, f'{{"error":"MCP-Protocol-Version {got!r}, want {wanted!r}"}}'.encode()
+        if options.require_header:
+            name, _, value = options.require_header.partition("=")
+            got = self.headers.get(name)
+            with ctx.lock:
+                ctx.headers_seen.append(got if got is not None else "<missing>")
+            if got != value:
+                return 400, f'{{"error":"header {name!r} is {got!r}, want {value!r}"}}'.encode()
+
+        if method == "initialize":
+            with ctx.lock:
+                ctx.initialize_had_session_id = self.headers.get("Mcp-Session-Id") is not None
+            return None
+        if ctx.session_id is None:
+            return None
+        presented = self.headers.get("Mcp-Session-Id")
+        if presented != ctx.session_id:
+            return 400, b'{"error":"missing or wrong Mcp-Session-Id"}'
+        if is_request and options.bad_session_after is not None:
+            with ctx.lock:
+                dropped = ctx.answered_after_initialize >= options.bad_session_after
+            if dropped:
+                return 404, b'{"error":"session terminated"}'
+        return None
+
+    def _run_handlers(
+        self,
+        method: str,
+        request_id: object,
+        params: object,
+        options: argparse.Namespace,
+        ctx: _HttpServer,
+    ) -> list[str] | None:
+        """Run the shared ``_answer_*`` handlers and collect what they emitted.
+
+        ``None`` means the handlers answered nothing, which is how a ``--hang``
+        flag reaches HTTP mode: the same code path stdio uses, with no HTTP
+        version of the hang to keep in sync.
+        """
+        _sink.lines = []
+        try:
+            _answer(method, request_id, params, options, ctx.state)
+        finally:
+            lines = list(_sink.lines)
+            del _sink.lines
+        return lines or None
+
+    def _reply(
+        self,
+        status: int,
+        body: bytes,
+        content_type: str = "application/json",
+        extra: dict[str, str] | None = None,
+    ) -> None:
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        for name, value in (extra or {}).items():
+            self.send_header(name, value)
+        self.end_headers()
+        if body:
+            self.wfile.write(body)
+        self.wfile.flush()
+
+    def _reply_sse(self, lines: list[str], session_id: str | None = None) -> None:
+        """One SSE event per JSON-RPC message, then close the stream.
+
+        The leading ``:`` comment and the ``event: message`` field are both legal
+        SSE that real servers send, so they are included deliberately: a client
+        that parses SSE by treating every line as data has to fail here rather than
+        in front of a server that does it.
+        """
+        parts = [": fixture keepalive\n\n"]
+        for line in lines:
+            parts.append(f"event: message\ndata: {line.strip()}\n\n")
+        body = "".join(parts).encode("utf-8")
+        extra = {"Mcp-Session-Id": session_id} if session_id else {}
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Connection", "close")
+        for name, value in extra.items():
+            self.send_header(name, value)
+        self.end_headers()
+        self.wfile.write(body)
+        self.wfile.flush()
+
+
+def _serve_http(options: argparse.Namespace) -> int:
+    """Serve the MCP endpoint until killed. Returns only if the bind fails."""
+    if not options.port_file:
+        log("--http requires --port-file")
+        return 2
+    ctx = _HttpServer(options)
+    try:
+        server = _Server(("127.0.0.1", 0), _Handler)
+    except OSError as exc:
+        log(f"fixture could not bind: {exc}")
+        return 2
+    server.ctx = ctx
+    with open(options.port_file, "w", encoding="utf-8") as handle:
+        handle.write(str(server.server_address[1]))
+    log(f"fixture listening on port {server.server_address[1]}")
+    try:
+        server.serve_forever(poll_interval=0.05)
+    except KeyboardInterrupt:
+        return 0
+    return 0
+
+
 def main(argv: list[str]) -> int:
     options = _parse_args(argv)
 
@@ -578,6 +958,8 @@ def main(argv: list[str]) -> int:
             time.sleep(3600)
 
     _startup_noise(options)
+    if options.http:
+        return _serve_http(options)
     return _serve(options)
 
 

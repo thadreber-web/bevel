@@ -2,10 +2,18 @@
 
 This is the only module in the package that owns a server's *lifecycle*.
 :func:`~bevel.mcp.bridge.bridge_tools` deliberately does not spawn or close
-anything, and :class:`~bevel.mcp.stdio.StdioTransport` knows nothing about
-configuration; the seam between them is here, where a dict of
+anything, and neither :class:`~bevel.mcp.stdio.StdioTransport` nor
+:class:`~bevel.mcp.http.HttpTransport` knows anything about configuration; the
+seam between them is here, where a dict of
 :class:`~bevel.config.schema.McpServerConfig` becomes a set of live servers and
 the tools they contributed.
+
+Which transport a server gets is decided by the one key its table carries:
+``command`` means a child process, ``url`` means a streamable-HTTP endpoint. The
+loader has already refused a table with both or neither, so nothing here
+arbitrates -- and nothing below the report cares which one it got, which is why
+:attr:`ServerReport.command` holds the URL for an HTTP server rather than the
+dataclass growing a second field the CLI would have to branch on.
 
 Two rules shape everything below.
 
@@ -17,10 +25,12 @@ handshake, call) and quotes the tail of the server's stderr -- the only thing a
 user can actually act on.
 
 **Everything started must be gone when :meth:`McpServers.aclose` returns.**
-Servers are children of this process, so a leak is a leaked process tree on the
-user's machine. Each transport is closed individually and closing is safe to
-repeat, so a caller that closes in a ``finally`` and an outer cleanup both
-survive.
+stdio servers are children of this process, so a leak there is a leaked process
+tree on the user's machine. Each transport is closed individually and closing is
+safe to repeat, so a caller that closes in a ``finally`` and an outer cleanup
+both survive. The HTTP transport's guarantee is the opposite one and just as
+much a leak if broken: it ends its own session and closes its own connection
+pool, and never touches a process it did not start.
 
 Servers are started one after another rather than concurrently. Startup is not
 the bottleneck a run has, and sequential spawning keeps the reports in config
@@ -38,7 +48,13 @@ from dataclasses import dataclass
 from bevel.config.schema import McpServerConfig
 
 from .bridge import BridgedServer, BridgedTool, ToolRefusal, bridge_tools
+from .http import HttpTransport
 from .stdio import McpTransportError, StdioTransport
+
+#: Either transport, whichever the config's one key selected. Named once because
+#: it appears in four signatures below and a reader should not have to expand it
+#: each time.
+Transport = StdioTransport | HttpTransport
 
 logger = logging.getLogger(__name__)
 
@@ -65,8 +81,9 @@ class ServerReport:
     tools: tuple[str, ...] = ()
     refusals: tuple[ToolRefusal, ...] = ()
     pid: int | None = None
-    #: The command line, so a down server can be compared against what the user
-    #: meant. Never the ``env`` values.
+    #: What to show for this server: its argv, or its URL for a streamable-HTTP
+    #: one. Either way it is the thing a user compares against what they meant.
+    #: Never the ``env`` values.
     command: tuple[str, ...] = ()
 
 
@@ -80,7 +97,7 @@ class McpServers:
 
     def __init__(
         self,
-        transports: Sequence[tuple[StdioTransport | None, ServerReport]],
+        transports: Sequence[tuple[Transport | None, ServerReport]],
         tools: Sequence[BridgedTool],
     ) -> None:
         self._transports = list(transports)
@@ -131,7 +148,7 @@ async def start_servers(configs: Mapping[str, McpServerConfig]) -> McpServers:
     server plus whatever tools survived. The caller owns the processes from the
     moment this returns and must call :meth:`McpServers.aclose`.
     """
-    started: list[tuple[StdioTransport | None, ServerReport]] = []
+    started: list[tuple[Transport | None, ServerReport]] = []
     tools: list[BridgedTool] = []
     #: offered name -> the server that claimed it first.
     taken: dict[str, str] = {}
@@ -140,22 +157,56 @@ async def start_servers(configs: Mapping[str, McpServerConfig]) -> McpServers:
         if not config.enabled:
             started.append((None, _disabled_report(name, config)))
             continue
-        transport = StdioTransport(
-            list(_argv(config)),
-            cwd=config.cwd,
-            env=_environment(config),
-            spawn_timeout=config.timeout,
-            handshake_timeout=config.timeout,
-            call_timeout=config.timeout,
-        )
+        transport = _build_transport(config)
         report, bridged = await _start_one(transport, name, config, taken)
         tools.extend(bridged)
-        started.append((transport if report.pid is not None else None, report))
+        # The transport is kept even when its report says it never came up:
+        # ``close`` is safe on a transport that got as far as constructing a
+        # client or a spawn attempt, and dropping it here is how a half-started
+        # child or a half-open connection pool gets forgotten about.
+        started.append((transport, report))
     return McpServers(started, tools)
 
 
+def _build_transport(config: McpServerConfig) -> Transport:
+    """The transport the config's one key selects.
+
+    ``url`` means HTTP and ``command`` means a child process; the loader has
+    already refused a table with both or neither, so there is nothing to arbitrate
+    here beyond picking the branch. Each transport gets the configured ``timeout``
+    for every phase it has, exactly as stdio has always done -- an HTTP server
+    that loads a big model at startup needs the same knob raised for the same
+    reason a stdio one does.
+    """
+    if config.url is not None:
+        return HttpTransport(
+            config.url,
+            connect_timeout=config.timeout,
+            handshake_timeout=config.timeout,
+            call_timeout=config.timeout,
+        )
+    if config.command is None:  # pragma: no cover - the loader refuses this
+        raise McpTransportError("this server declares neither command nor url")
+    return StdioTransport(
+        list(_argv(config)),
+        cwd=config.cwd,
+        env=_environment(config),
+        spawn_timeout=config.timeout,
+        handshake_timeout=config.timeout,
+        call_timeout=config.timeout,
+    )
+
+
 def _argv(config: McpServerConfig) -> tuple[str, ...]:
-    return (config.command, *config.args)
+    """What to show a user about this server: its argv, or its URL.
+
+    One field in the report rather than two, because ``bevel mcp list`` prints
+    one line per server and "command: https://…" reads honestly. Splitting it
+    would mean the CLI has to know which transport a server was.
+    """
+    if config.url is not None:
+        return (config.url,)
+    return (config.command or "", *config.args)
 
 
 def _environment(config: McpServerConfig) -> dict[str, str]:
@@ -187,7 +238,7 @@ def _disabled_report(name: str, config: McpServerConfig) -> ServerReport:
 
 
 async def _start_one(
-    transport: StdioTransport,
+    transport: Transport,
     name: str,
     config: McpServerConfig,
     taken: dict[str, str],

@@ -147,28 +147,38 @@ model = "Qwen2.5-Coder-32B-Instruct"
 # MCP servers: tools from someone else's process
 # ---------------------------------------------------------------------------
 #
-# Each [mcp.servers.<name>] table describes one stdio MCP server bevel spawns
-# at the start of a run and bridges into the tool list. <name> becomes the
+# Each [mcp.servers.<name>] table describes one MCP server bevel starts at the
+# beginning of a run and bridges into the tool list. <name> becomes the
 # prefix on every tool it contributes -- a server named `fs` offering `read`
 # shows up to the model as `fs__read` -- so it must be letters, digits, '.',
 # '_' or '-', starting with a letter or digit.
 #
+# A server declares exactly ONE of `command` or `url`, and never both.
+# `command` names a program bevel spawns and talks to over its stdin/stdout.
+# `url` names a streamable-HTTP endpoint bevel POSTs JSON-RPC to -- a server on
+# another machine, or one you did not start. It must start with http:// or
+# https://.
+#
 # command, args, cwd are used as argv directly and never through a shell, so
-# there is no quoting to get wrong here. `command` is the only required key.
+# there is no quoting to get wrong here.
 #
 # TRAP: `env` is merged INTO the environment bevel was started with, it does
 # not replace it. A stdio server spawned with a bare environment has no PATH,
 # which on Windows means it fails to start for a reason you cannot see. So
 # these entries add to and override what you already have; there is no way to
-# ask for an empty environment.
+# ask for an empty environment. It has no effect on a `url` server -- there is
+# no process of ours to give an environment to.
 #
 # `timeout` is one number applied to all three phases: spawning the child,
 # completing the handshake, and each tool call. Raise it for a server that
-# loads a big model at startup.
+# loads a big model at startup. For a `url` server it bounds the handshake and
+# each call; the TCP connect has its own fixed budget, so a wrong URL is
+# reported as a wrong URL rather than as a hang.
 #
 # A server that cannot start does not stop the run. It is reported by name
-# with the last lines of its stderr, and everything else still works. Check
-# with `bevel mcp list`, which prints the same report without starting a run.
+# with the last lines of its stderr (or, for a `url` server, the body of the
+# error it answered with), and everything else still works. Check with
+# `bevel mcp list`, which prints the same report without starting a run.
 # It never prints your env values.
 #
 # [mcp.servers.filesystem]
@@ -178,6 +188,11 @@ model = "Qwen2.5-Coder-32B-Instruct"
 # cwd = "D:/work"                 # where the server process starts
 # enabled = true                  # false keeps it out of the run, still listed
 # timeout = 30.0                  # seconds, per spawn / handshake / tool call
+#
+# [mcp.servers.remote]
+# url = "https://mcp.example.test/rpc"   # exactly one of command or url
+# enabled = true
+# timeout = 30.0
 #
 # Two servers whose names sanitise to the same prefix (my-server and my_server)
 # would both claim `my_server__read`, so bevel refuses the colliding tool and

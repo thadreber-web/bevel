@@ -1,10 +1,12 @@
 """Turn what a server says it can do into tools the model is actually offered.
 
-This is m10c. :class:`~bevel.mcp.stdio.StdioTransport` speaks the wire and stops
-there -- it deliberately imports nothing from ``core/tools/``. This module is
+This is m10c. :class:`~bevel.mcp.stdio.StdioTransport` and
+:class:`~bevel.mcp.http.HttpTransport` speak the wire and stop there -- they
+deliberately import nothing from ``core/tools/``. This module is
 where that boundary is allowed to be crossed: it takes a transport someone else
 already started, asks it for ``tools/list``, and hands back objects satisfying
-:class:`~bevel.core.tools.base.Tool`.
+:class:`~bevel.core.tools.base.Tool`. Which transport it is, this module does not
+ask; see :class:`StartedTransport`.
 
 **The oracle is** ``tests/fixtures/mcp_server.py`` spawned for real by argv.
 Every bridged tool in ``tests/unit/test_mcp_bridge.py`` is driven end to end
@@ -66,14 +68,14 @@ from __future__ import annotations
 
 import logging
 import re
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, Final
+from typing import Any, Final, Protocol
 
 from bevel.core.tools.base import RiskTier, ToolContext, ToolError, ToolResult
 from bevel.core.tools.schema import unsupported_keywords
 from bevel.core.tools.types import ToolSpec
-from bevel.mcp.stdio import McpHandshakeError, StdioTransport
+from bevel.mcp.stdio import McpHandshakeError
 
 logger = logging.getLogger(__name__)
 
@@ -89,6 +91,32 @@ _NAME_RE: Final[re.Pattern[str]] = re.compile(r"^[a-z][a-z0-9_]*$")
 _UNDOCUMENTED: Final[str] = (
     "Undocumented argument: the server declared this parameter but gave no description."
 )
+
+
+class StartedTransport(Protocol):
+    """What the bridge needs from a transport that is already up.
+
+    Both transports satisfy this and neither declares it: stdio has a child
+    process and pipes, HTTP has a URL and a session id, and the bridge is
+    supposed to care about neither. Naming the two members used -- one request
+    and one error tail -- is the whole contract, so a third transport arrives
+    without a change here and this module keeps importing neither of them.
+
+    ``stderr_tail`` is stdio's name kept for both. It is the transport's honest
+    answer to "what did the server last say that might explain this", which for
+    HTTP is the body of its last error response; the bridge quotes it for either.
+    """
+
+    @property
+    def stderr_tail(self) -> str: ...
+
+    async def call(
+        self,
+        method: str,
+        params: Mapping[str, Any] | Sequence[Any] | None = None,
+        *,
+        timeout: float | None = None,  # noqa: ASYNC109 - a protocol signature, not a local deadline
+    ) -> Any: ...
 
 
 @dataclass(frozen=True)
@@ -117,7 +145,7 @@ class BridgedTool:
 
     def __init__(
         self,
-        transport: StdioTransport,
+        transport: StartedTransport,
         server_name: str,
         remote_name: str,
         spec: ToolSpec,
@@ -193,7 +221,7 @@ class BridgedServer:
         raise KeyError(f"{self.server_name!r} does not offer a tool named {name!r}")
 
 
-async def bridge_tools(transport: StdioTransport, server_name: str) -> BridgedServer:
+async def bridge_tools(transport: StartedTransport, server_name: str) -> BridgedServer:
     """Offer the tools of an already-started ``transport`` under ``server_name``.
 
     The caller owns the transport and must have started it; this issues its own
@@ -227,7 +255,7 @@ async def bridge_tools(transport: StdioTransport, server_name: str) -> BridgedSe
 
 
 def _bridge_one(
-    transport: StdioTransport,
+    transport: StartedTransport,
     server_name: str,
     entry: object,
     taken: Mapping[str, str],

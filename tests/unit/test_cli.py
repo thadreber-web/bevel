@@ -9,8 +9,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+import socket
 import subprocess
 import sys
+import time
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -694,6 +697,20 @@ class TestMcp:
     command's whole job is to tell you whether a server is really up.
     """
 
+    @pytest.fixture(autouse=True)
+    def _reap_fixtures(self) -> Iterator[None]:
+        """Kill any HTTP fixture a test started, whatever the test did.
+
+        ``bevel mcp list`` closes its own transports, but a fixture is a process
+        this file started, and a leaked one on Windows outlives the test run.
+        """
+        self._procs: list[subprocess.Popen[bytes]] = []
+        yield
+        for proc in self._procs:
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait()
+
     def _configure(
         self,
         tmp_path: Path,
@@ -821,6 +838,86 @@ class TestMcp:
         out = captured.out + captured.err
         assert "hunter2-super-secret" not in out
         assert "TOKEN" not in out, "naming the variable is fine, printing its value is not"
+
+    def test_an_http_server_is_reported_the_same_way_a_stdio_one_is(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """One list, two transports: the row must not change shape.
+
+        The fixture is spawned in HTTP mode by the test, but the server is
+        started by ``bevel mcp list`` from a config holding only ``url``, so this
+        is the real command path rather than a rendering of a hand-made report.
+        """
+        url = self._serve_http(tmp_path)
+        self._configure(tmp_path, monkeypatch, self._http_table(url))
+        assert main(["mcp", "list"]) == 0
+        out = capsys.readouterr().out
+        assert "remote" in out
+        assert "enabled" in out
+        assert "up" in out
+        assert "echo" in out, "an HTTP server's tools must be listed like a stdio server's"
+        assert url in out, "the URL is what a user checks when the server is down"
+
+    def test_an_http_server_that_never_handshakes_is_reported_down_and_exits_zero(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """The not-handshaked case, which is the one that actually happens.
+
+        A port bound by a socket nobody accepts on is what "the URL is wrong"
+        looks like once the name has resolved, and it is the closest thing to a
+        dead server that does not depend on DNS or on someone else's machine.
+        """
+        listener = socket.socket()
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(0)
+        port = listener.getsockname()[1]
+        listener.close()
+        self._configure(
+            tmp_path,
+            monkeypatch,
+            self._http_table(f"http://127.0.0.1:{port}") + "\n" + self._fixture_table(),
+        )
+        assert main(["mcp", "list"]) == 0
+        out = capsys.readouterr().out
+        assert "remote" in out
+        assert "down" in out
+        assert f"http://127.0.0.1:{port}" in out
+        assert "fixture" in out, "one dead server must not hide the healthy one"
+        assert "1 of 2 server(s) answered" in out
+
+    def _serve_http(self, tmp_path: Path) -> str:
+        """Spawn the fixture in HTTP mode for the duration of the test; return its URL."""
+        port_file = tmp_path / "port"
+        proc = subprocess.Popen(
+            [sys.executable, str(FIXTURE), "--http", "--port-file", str(port_file)],
+            cwd=str(tmp_path),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        self._procs.append(proc)
+        deadline = time.monotonic() + 15.0
+        while time.monotonic() < deadline:
+            if port_file.exists() and port_file.read_text(encoding="utf-8").strip():
+                return f"http://127.0.0.1:{port_file.read_text(encoding='utf-8').strip()}"
+            if proc.poll() is not None:
+                raise AssertionError(f"the fixture exited early with {proc.returncode}")
+            time.sleep(0.02)
+        raise AssertionError("the fixture never wrote its port file")
+
+    def _http_table(self, url: str, **fields: object) -> str:
+        lines = [
+            "[mcp.servers.remote]",
+            f"url = {json.dumps(url)}",
+            "timeout = 15.0",
+        ]
+        lines.extend(f"{key} = {value}" for key, value in fields.items())
+        return "\n".join(lines)
 
     def test_no_servers_configured_says_so_and_exits_zero(
         self,

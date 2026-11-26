@@ -81,7 +81,15 @@ DEFAULT_MCP_TIMEOUT = 30.0
 
 @dataclass(frozen=True)
 class McpServerConfig:
-    """One ``[mcp.servers.<name>]`` table: how to spawn one server.
+    """One ``[mcp.servers.<name>]`` table: how to reach one server.
+
+    Exactly one of ``command`` or ``url`` is set, and the loader refuses a table
+    that declares both or neither. ``command`` (with ``args``/``cwd``) is a stdio
+    server bevel spawns; ``url`` is a streamable-HTTP server bevel speaks to over
+    the network. The two are mutually exclusive because a process at a path and a
+    process at a URL are different things to start, and silently preferring one
+    would make a half-edited table mean whichever key the code happened to read
+    first.
 
     ``command``/``args``/``cwd`` are used as argv directly -- never through a
     shell -- so there is no quoting to get wrong and nothing to inject. The
@@ -93,14 +101,18 @@ class McpServerConfig:
     Windows means most servers fail to start for a reason the user cannot see.
     Replacing the environment would be the more secure choice, but it turns a
     working config into a broken one, and bevel's sandboxing is not this
-    layer's job.
+    layer's job. It means nothing to an ``url`` server, and the loader accepts it
+    there rather than inventing a per-transport key check: it is simply never
+    read.
 
     ``timeout`` is one number applied to all three phases of the transport
     (spawn, handshake, tool call). Splitting it into three keys would be three
     more things to configure and nobody has yet hit a case where they differ.
     """
 
-    command: str
+    command: str | None = None
+    #: A streamable-HTTP endpoint. Set instead of ``command``, never alongside it.
+    url: str | None = None
     args: tuple[str, ...] = ()
     env: dict[str, str] = field(default_factory=dict)
     cwd: Path | None = None
