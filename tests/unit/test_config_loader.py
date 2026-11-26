@@ -533,3 +533,177 @@ class TestMemoryTable:
         write(cwd / PROJECT_FILENAME, f"memory = 'nope'\n{MINIMAL}")
         with pytest.raises(ConfigError, match=r"\[memory\] must be a table"):
             load(cwd=cwd, env={})
+
+
+def mcp_table(name: str = "fixture", **fields: str) -> str:
+    """A ``[mcp.servers.<name>]`` table body from already-quoted TOML values."""
+    lines = [f"[mcp.servers.{name}]"]
+    lines.extend(f"{key} = {value}" for key, value in fields.items())
+    return "\n".join(lines)
+
+
+def with_servers(*tables: str) -> str:
+    """A whole profile file: the minimal profile plus the given server tables."""
+    return "\n".join((MINIMAL, *tables))
+
+
+#: A quoted TOML string, so a test can say ``toml_str("srv")`` rather than
+#: carrying a backslash-escaped quote through an f-string (illegal on 3.11).
+def toml_str(value: str) -> str:
+    return f'"{value}"'
+
+
+class TestMcpServersTable:
+    """``[mcp.servers.<name>]``: the six keys, and nothing else."""
+
+    def test_no_servers_table_means_no_servers(self, cwd: Path) -> None:
+        assert load(cwd=cwd, env={}).mcp_servers == {}
+
+    def test_a_server_is_read_with_every_key(self, cwd: Path) -> None:
+        write(
+            cwd / PROJECT_FILENAME,
+            with_servers(
+                mcp_table(
+                    "fixture",
+                    command=toml_str("python"),
+                    args="['-m', 'server', '--x']",
+                    env="{TOKEN = 'secret'}",
+                    cwd=toml_str("D:/work"),
+                    enabled="false",
+                    timeout="3.5",
+                )
+            ),
+        )
+        server = load(cwd=cwd, env={}).mcp_servers["fixture"]
+        assert server.command == "python"
+        assert server.args == ("-m", "server", "--x")
+        assert server.env == {"TOKEN": "secret"}
+        assert server.cwd == Path("D:/work")
+        assert server.enabled is False
+        assert server.timeout == 3.5
+
+    def test_only_command_is_required(self, cwd: Path) -> None:
+        write(cwd / PROJECT_FILENAME, with_servers(mcp_table("a", command=toml_str("srv"))))
+        server = load(cwd=cwd, env={}).mcp_servers["a"]
+        assert server.command == "srv"
+        assert server.args == ()
+        assert server.env == {}
+        assert server.cwd is None
+        assert server.enabled is True
+        assert server.timeout == 30.0
+
+    def test_several_servers_are_all_kept(self, cwd: Path) -> None:
+        write(
+            cwd / PROJECT_FILENAME,
+            with_servers(
+                mcp_table("a", command=toml_str("one")), mcp_table("b", command=toml_str("two"))
+            ),
+        )
+        assert sorted(load(cwd=cwd, env={}).mcp_servers) == ["a", "b"]
+
+    def test_a_later_file_replaces_the_same_server_wholesale(self, cwd: Path) -> None:
+        """Per-key merging would leave a stale ``args`` behind when a project overrides a
+        user's server. A table is one unit: the later file states all of it or none.
+        """
+        write(
+            loader.config_home() / "config.toml",
+            with_servers(
+                mcp_table("a", command=toml_str("user-cmd"), args="['--keep-me']", env="{A = '1'}")
+            ),
+        )
+        write(cwd / PROJECT_FILENAME, mcp_table("a", command=toml_str("project-cmd")))
+        server = load(cwd=cwd, env={}).mcp_servers["a"]
+        assert server.command == "project-cmd"
+        assert server.args == ()
+        assert server.env == {}
+
+    def test_a_later_file_adds_a_different_server(self, cwd: Path) -> None:
+        write(
+            loader.config_home() / "config.toml",
+            with_servers(mcp_table("user", command=toml_str("u"))),
+        )
+        write(cwd / PROJECT_FILENAME, mcp_table("project", command=toml_str("p")))
+        assert sorted(load(cwd=cwd, env={}).mcp_servers) == ["project", "user"]
+
+    @pytest.mark.parametrize(
+        ("body", "expected"),
+        [
+            (mcp_table("a", command="'c'", commandd="'d'"), "commandd"),
+            (mcp_table("a", command="'c'", argss="[]"), "argss"),
+            (mcp_table("a", command="'c'", envv="{}"), "envv"),
+            (mcp_table("a", command="'c'", cwdd="'.'"), "cwdd"),
+            (mcp_table("a", command="'c'", enable="true"), "enable"),
+            (mcp_table("a", command="'c'", timeouts="1"), "timeouts"),
+        ],
+    )
+    def test_unknown_keys_are_rejected_with_the_expected_list(
+        self, cwd: Path, body: str, expected: str
+    ) -> None:
+        write(cwd / PROJECT_FILENAME, with_servers(body))
+        with pytest.raises(ConfigError, match=rf"unknown key\(s\).*{expected}"):
+            load(cwd=cwd, env={})
+
+    def test_unknown_key_error_names_the_file_and_the_server(self, cwd: Path) -> None:
+        path = write(
+            cwd / PROJECT_FILENAME, with_servers(mcp_table("a", command="'c'", nonsense="1"))
+        )
+        with pytest.raises(ConfigError) as excinfo:
+            load(cwd=cwd, env={})
+        message = str(excinfo.value)
+        assert str(path) in message
+        assert "mcp.servers.a" in message
+        assert "nonsense" in message
+
+    @pytest.mark.parametrize("key", ["command", "args", "env", "cwd", "enabled", "timeout"])
+    def test_every_key_is_documented_in_the_example(self, key: str) -> None:
+        """The example file is the only place a key is explained; an undocumented key is
+        a key nobody finds."""
+        example = (REPO_ROOT / "bevel.toml.example").read_text(encoding="utf-8")
+        assert "[mcp.servers." in example
+        assert re.search(rf"^#\s*{key} = ", example, re.MULTILINE)
+
+    @pytest.mark.parametrize(
+        ("body", "expected"),
+        [
+            (mcp_table("a"), r"command is required"),
+            (mcp_table("a", command="''"), r"command must be a non-empty string"),
+            (mcp_table("a", command="'c'", command2="'d'"), "command2"),
+            (mcp_table("a", command="'c'", args="'not a list'"), r"args must be a list of strings"),
+            (mcp_table("a", command="'c'", args="[1]"), r"args must be a list of strings"),
+            (mcp_table("a", command="'c'", env="'not a table'"), r"env must be a table"),
+            (mcp_table("a", command="'c'", env="{N = 1}"), r"env values must be strings"),
+            (mcp_table("a", command="'c'", cwd="1"), r"cwd must be a string"),
+            (mcp_table("a", command="'c'", enabled="'yes'"), r"enabled must be a boolean"),
+            (mcp_table("a", command="'c'", timeout="'30'"), r"timeout must be a positive number"),
+            (mcp_table("a", command="'c'", timeout="0"), r"timeout must be a positive number"),
+            (mcp_table("a", command="'c'", timeout="-1"), r"timeout must be a positive number"),
+            (mcp_table("a", command="'c'", timeout="true"), r"timeout must be a positive number"),
+        ],
+    )
+    def test_malformed_values_are_rejected(self, cwd: Path, body: str, expected: str) -> None:
+        write(cwd / PROJECT_FILENAME, with_servers(body))
+        with pytest.raises(ConfigError, match=expected):
+            load(cwd=cwd, env={})
+
+    @pytest.mark.parametrize("name", ["bad name", ""])
+    def test_server_names_must_be_usable_handles(self, cwd: Path, name: str) -> None:
+        """The name is the tool prefix and the handle in ``bevel mcp list``; a name with
+        spaces or an empty name would produce an unusable tool name."""
+        write(cwd / PROJECT_FILENAME, with_servers(f"[mcp.servers.{name!r}]\ncommand = 'c'"))
+        with pytest.raises(ConfigError, match="server name"):
+            load(cwd=cwd, env={})
+
+    def test_the_mcp_section_must_be_a_table(self, cwd: Path) -> None:
+        write(cwd / PROJECT_FILENAME, f"mcp = 'nope'\n{MINIMAL}")
+        with pytest.raises(ConfigError, match=r"\[mcp\] must be a table"):
+            load(cwd=cwd, env={})
+
+    def test_the_servers_key_must_be_a_table(self, cwd: Path) -> None:
+        write(cwd / PROJECT_FILENAME, f"{MINIMAL}\n[mcp]\nservers = 'nope'\n")
+        with pytest.raises(ConfigError, match=r"\[mcp\] servers must be a table"):
+            load(cwd=cwd, env={})
+
+    def test_a_server_table_must_be_a_table(self, cwd: Path) -> None:
+        write(cwd / PROJECT_FILENAME, f"{MINIMAL}\n[mcp]\nservers.a = 'nope'\n")
+        with pytest.raises(ConfigError, match=r"mcp\.servers\.a must be a table"):
+            load(cwd=cwd, env={})

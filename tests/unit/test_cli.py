@@ -31,6 +31,12 @@ def _pin_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return path
 
 
+#: The real stdio MCP server every m10 slice spawns. ``bevel mcp list`` is
+#: tested against it rather than a stub, because the command's only job is to
+#: report whether a server is genuinely up.
+FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "mcp_server.py"
+
+
 class TestParser:
     def test_no_flag_is_parsed_without_being_read(self) -> None:
         """Every option the parser accepts must be one the current code acts on.
@@ -676,6 +682,162 @@ class TestDefaultInvocation:
             check=True,
         )
         assert probe.stdout.strip() == "False"
+
+
+class TestMcp:
+    """``bevel mcp list`` -- the only way to see what the config actually does.
+
+    These spawn ``tests/fixtures/mcp_server.py`` for real. A list command tested
+    against a stubbed transport would print whatever the stub was told to, which
+    is exactly the kind of confident lie this project refuses to ship: the
+    command's whole job is to tell you whether a server is really up.
+    """
+
+    def _configure(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        servers: str,
+    ) -> Path:
+        """Write a project config with the given ``[mcp.servers.*]`` tables."""
+        for name in ("BEVEL_BASE_URL", "BEVEL_MODEL", "BEVEL_PROFILE", "BEVEL_CONFIG"):
+            monkeypatch.delenv(name, raising=False)
+        monkeypatch.setattr(loader, "config_home", lambda: tmp_path / "empty-config-home")
+        project = tmp_path / "project"
+        project.mkdir(parents=True, exist_ok=True)
+        (project / "bevel.toml").write_text(
+            "[profile.default]\n"
+            'base_url = "https://models.test/v1"\n'
+            'model = "test-model"\n'
+            f"\n{servers}\n",
+            encoding="utf-8",
+        )
+        monkeypatch.chdir(project)
+        return project
+
+    def _fixture_table(self, name: str = "fixture", **fields: object) -> str:
+        lines = [f"[mcp.servers.{name}]", f'command = "{sys.executable}"', f'args = ["{FIXTURE}"]']
+        lines.extend(f"{key} = {value}" for key, value in fields.items())
+        return "\n".join(lines)
+
+    def test_mcp_is_no_longer_a_pending_command(self) -> None:
+        """The honesty rule: a command that works must not announce itself as unbuilt."""
+        assert "mcp" not in _PENDING
+
+    def test_the_subcommand_takes_only_positionals(self) -> None:
+        """A ``--flag`` here would have to be read by this milestone."""
+        subparser = next(
+            action.choices["mcp"]
+            for action in build_parser()._actions
+            if action.choices and "mcp" in action.choices
+        )
+        options = {option for action in subparser._actions for option in action.option_strings}
+        assert options == {"-h", "--help"}
+
+    def test_no_action_is_a_usage_error(self, capsys: pytest.CaptureFixture[str]) -> None:
+        assert main(["mcp"]) == 2
+        assert "list" in capsys.readouterr().err
+
+    def test_an_unknown_action_is_rejected(self) -> None:
+        with pytest.raises(SystemExit) as excinfo:
+            main(["mcp", "bogus"])
+        assert excinfo.value.code == 2
+
+    def test_a_server_that_handshakes_is_reported_up_with_its_tools(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        self._configure(tmp_path, monkeypatch, self._fixture_table())
+        assert main(["mcp", "list"]) == 0
+        out = capsys.readouterr().out
+        assert "fixture" in out
+        assert "enabled" in out
+        assert "up" in out
+        assert "echo" in out
+        assert "read_note" in out
+        assert str(FIXTURE) in out, "the command is what a user checks when a server is down"
+
+    def test_a_disabled_server_is_reported_disabled_and_never_spawned(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """Silently skipping it would leave the user wondering why it never appears."""
+        self._configure(tmp_path, monkeypatch, self._fixture_table(enabled="false"))
+        assert main(["mcp", "list"]) == 0
+        out = capsys.readouterr().out
+        assert "disabled" in out
+        assert "up" not in out.split(), "a disabled server must not be reported as running"
+
+    def test_a_server_that_cannot_start_is_reported_plainly_and_still_exits_zero(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """Reporting a down server faithfully *is* success; the command's job is to tell the truth."""
+        self._configure(
+            tmp_path,
+            monkeypatch,
+            self._fixture_table()
+            + '\n[mcp.servers.broken]\ncommand = "definitely-not-a-program"\n',
+        )
+        assert main(["mcp", "list"]) == 0
+        out = capsys.readouterr().out
+        assert "broken" in out
+        assert "down" in out
+        assert "definitely-not-a-program" in out
+        assert "fixture" in out, "one dead server must not hide the healthy one"
+
+    def test_the_environment_values_are_never_printed(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """Same leak class as ``api_key_env``: a token in a config is not print material.
+
+        ``bevel mcp list`` output ends up in a terminal someone screenshots and
+        in a bug report someone pastes, so the values never leave the process.
+        """
+        self._configure(
+            tmp_path,
+            monkeypatch,
+            self._fixture_table(env='{TOKEN = "hunter2-super-secret"}'),
+        )
+        assert main(["mcp", "list"]) == 0
+        captured = capsys.readouterr()
+        out = captured.out + captured.err
+        assert "hunter2-super-secret" not in out
+        assert "TOKEN" not in out, "naming the variable is fine, printing its value is not"
+
+    def test_no_servers_configured_says_so_and_exits_zero(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        self._configure(tmp_path, monkeypatch, "")
+        assert main(["mcp", "list"]) == 0
+        out = capsys.readouterr().out
+        assert "no MCP servers configured" in out
+        assert "bevel.toml" in out, "the message has to say where a server would be configured"
+
+    def test_an_unusable_config_exits_non_zero_naming_the_file(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """A typo'd key is a real failure, unlike a down server: nothing was reported faithfully."""
+        self._configure(tmp_path, monkeypatch, self._fixture_table(nonsense="1"))
+        assert main(["mcp", "list"]) == 2
+        err = capsys.readouterr().err
+        assert "nonsense" in err
+        assert "bevel.toml" in err
 
 
 class TestUnknownInput:

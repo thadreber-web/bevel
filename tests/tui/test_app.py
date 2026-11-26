@@ -12,7 +12,9 @@ may open a socket.
 
 from __future__ import annotations
 
+import os
 import subprocess
+import sys
 from collections.abc import AsyncIterator, Callable, Sequence
 from pathlib import Path
 
@@ -25,7 +27,7 @@ from textual.pilot import Pilot
 from textual.widgets import Static
 
 from bevel.config import loader
-from bevel.config.schema import MemoryConfig, PolicyConfig, PolicyMode
+from bevel.config.schema import McpServerConfig, MemoryConfig, PolicyConfig, PolicyMode
 from bevel.core.agent import UNBUILT_SEAMS, Agent, ToolOutcome
 from bevel.core.checkpoint import snapshot
 from bevel.core.memory.store import MemoryStore, MemoryType, repo_scope
@@ -1075,3 +1077,177 @@ def test_run_tui_builds_a_todo_store_on_the_session_database_and_closes_it(
         "todos live in sessions.db, not somewhere else"
     )
     assert closed == [todos], "the entry point left the todo store open"
+
+
+# ------------------------------------------------------------------- mcp servers
+
+#: The real stdio MCP server every m10 slice spawns. The wiring tests drive it
+#: rather than a stub: the thing they have to prove is that a tool from a real
+#: child process reaches the model, and a stub could always reach the model.
+FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "mcp_server.py"
+
+#: Copied from ``test_tools_registry.py`` so that adding a built-in fails these
+#: tests loudly instead of quietly making "the built-ins survived" vacuous.
+BUILTIN_TOOLS = ["read", "grep", "glob", "recall", "todo", "write", "edit", "remember", "shell"]
+
+
+def mcp_config(*flags: str) -> dict[str, McpServerConfig]:
+    """One configured server that spawns the fixture, as a config would hold it."""
+    return {
+        "fixture": McpServerConfig(command=sys.executable, args=(str(FIXTURE), *flags)),
+    }
+
+
+def _process_alive(pid: int | None) -> bool:  # noqa: PLR0911 - one return per OS probe
+    """Liveness without adding a dependency; copied from ``test_mcp_stdio.py``."""
+    if pid is None:
+        return False
+    if sys.platform == "win32":
+        import ctypes  # noqa: PLC0415
+
+        kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+        handle = kernel32.OpenProcess(0x1000, False, pid)
+        if not handle:
+            return False
+        try:
+            code = ctypes.c_ulong()
+            if not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
+                return False
+            return code.value == 259
+        finally:
+            kernel32.CloseHandle(handle)
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+async def test_a_run_offers_bridged_tools_alongside_the_builtins(
+    tmp_path: Path, isolated_homes: None
+) -> None:
+    """The user-visible payoff of m10d, driven from the keyboard.
+
+    ``Agent(tools=...)`` *replaces* the built-ins, so both halves are asserted:
+    a wiring bug that handed over only the bridged tools would still offer
+    ``fixture__echo`` while leaving the model unable to read a file.
+    """
+    provider = MockProvider(turns=[ScriptedTurn(content="done")])
+    app = BevelApp(
+        provider=provider,
+        workspace=tmp_path,
+        policy=PolicyConfig(mode=PolicyMode.AUTO, db_path=tmp_path / "policy.db"),
+        mcp=mcp_config(),
+    )
+    async with app.run_test() as pilot:
+        await submit(pilot, "use a tool")
+        assert await settle(pilot, lambda: any("done" in line for line in lines(app)))
+
+    offered = provider.requests[0]["tools"]
+    assert isinstance(offered, list)
+    assert "fixture__echo" in offered, "the configured server never reached the model"
+    assert offered[: len(BUILTIN_TOOLS)] == BUILTIN_TOOLS
+
+
+async def test_a_run_closes_the_servers_it_started(tmp_path: Path, isolated_homes: None) -> None:
+    """Servers are per run, and a run that leaves one behind leaks a process tree.
+
+    The pid is read from the report the run recorded, after the run has ended --
+    which is the only moment at which "it was closed" is a fact rather than a
+    hope.
+    """
+    provider = MockProvider(turns=[ScriptedTurn(content="done")])
+    app = BevelApp(
+        provider=provider,
+        workspace=tmp_path,
+        policy=PolicyConfig(mode=PolicyMode.AUTO, db_path=tmp_path / "policy.db"),
+        mcp=mcp_config(),
+    )
+    async with app.run_test() as pilot:
+        await submit(pilot, "use a tool")
+        assert await settle(pilot, lambda: any("done" in line for line in lines(app)))
+
+    assert app._servers is not None, "the run never recorded the servers it started"
+    pid = app._servers.reports[0].pid
+    assert pid is not None
+    assert not _process_alive(pid), "the run finished and left its MCP server running"
+
+
+async def test_a_run_that_raised_still_closed_its_servers(
+    tmp_path: Path,
+    isolated_homes: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The ``finally`` is the whole point; the ordinary path proves nothing about it.
+
+    ``Agent`` is replaced with one that raises out of its stream, so the only
+    thing under test is whether the cleanup ran on the way out.
+    """
+    provider = MockProvider(turns=[ScriptedTurn(content="done")])
+    app = BevelApp(
+        provider=provider,
+        workspace=tmp_path,
+        policy=PolicyConfig(mode=PolicyMode.AUTO, db_path=tmp_path / "policy.db"),
+        mcp=mcp_config(),
+    )
+
+    class ExplodingAgent:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        async def stream(self, _task: str) -> AsyncIterator[object]:
+            raise RuntimeError("the loop blew up")
+            yield None  # pragma: no cover - makes this an async generator
+
+    monkeypatch.setattr("bevel.tui.app.Agent", ExplodingAgent)
+    async with app.run_test() as pilot:
+        await submit(pilot, "use a tool")
+        assert await settle(pilot, lambda: app._servers is not None)
+        assert await settle(pilot, lambda: app._agent is None and app._servers is not None)
+
+    pid = app._servers.reports[0].pid
+    assert pid is not None
+    assert not _process_alive(pid), "the run raised and left its MCP server running"
+
+
+def test_run_tui_hands_the_configured_servers_to_the_app(
+    tmp_path: Path,
+    isolated_homes: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Config that nothing reads is config that does not exist.
+
+    ``BevelApp`` accepting an ``mcp`` argument proves the app can use it; it says
+    nothing about ``run_tui`` ever passing one, which is the line that would
+    leave a user's ``[mcp.servers]`` table inert. So this drives the entry point
+    itself with the app stubbed out and reads back what it decided.
+
+    Sync, not async: ``run_tui`` owns the event loop.
+    """
+    for name in ("BEVEL_BASE_URL", "BEVEL_MODEL", "BEVEL_PROFILE", "BEVEL_CONFIG"):
+        monkeypatch.delenv(name, raising=False)
+
+    captured: dict[str, object] = {}
+
+    class RecordingApp:
+        def __init__(self, **kwargs: object) -> None:
+            captured.update(kwargs)
+
+        async def run_async(self) -> int:
+            return 0
+
+    monkeypatch.setattr("bevel.tui.app.BevelApp", RecordingApp)
+    config_dir = tmp_path / "config"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "config.toml").write_text(
+        '[profile.home]\nbase_url = "https://models.test/v1"\nmodel = "test-model"\n'
+        f"\n[mcp.servers.fixture]\ncommand = {sys.executable!r}\nargs = [{str(FIXTURE)!r}]\n",
+        encoding="utf-8",
+    )
+
+    assert run_tui(workspace=tmp_path) == 0
+    servers = captured["mcp"]
+    assert isinstance(servers, dict), "run_tui never handed the app any MCP config"
+    assert servers == mcp_config()

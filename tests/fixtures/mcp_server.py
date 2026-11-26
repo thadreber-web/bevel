@@ -49,9 +49,24 @@ Flags
         default list is pinned by m10b (``test_mcp_stdio.py`` asserts it is
         exactly ``TOOL_NAMES``), so anything designed to be refused by the
         bridge lives behind this flag rather than in the default payload.
+    ``--report-env NAME``
+        Answer ``echo`` with ``NAME=<value>`` read from this process's own
+        environment, or ``NAME=<unset>``. m10d's config hands a server an
+        ``env`` table, and the only honest proof that it arrived is the value
+        coming back out of the child rather than out of the parent that wrote
+        it.
+    ``--report-cwd``
+        Answer ``echo`` with ``os.getcwd()``. Same reasoning: ``cwd`` is a
+        config key, and only the child knows what it was actually started in.
 
-The environment is inherited and deliberately not consulted: every knob is a
-flag, so a test's intent is visible in the argv it spawns with.
+    Both report flags change what ``echo`` *answers*, never what it advertises,
+    so the descriptor list stays exactly ``TOOL_NAMES`` and the expectations
+    m10b and m10c pin are unaffected.
+
+The environment is inherited and otherwise not consulted: every knob is a
+flag, so a test's intent is visible in the argv it spawns with. The one
+exception is ``--report-env``, whose entire subject is the environment a client
+handed this process -- reading it is the test, not a dependency on it.
 """
 
 from __future__ import annotations
@@ -277,10 +292,21 @@ def _text_block(text: str) -> dict[str, object]:
     return {"content": [{"type": "text", "text": text}]}
 
 
+def _echo_text(options: argparse.Namespace, text: str) -> str:
+    """What ``echo`` answers: its argument, or the requested environment fact."""
+    if getattr(options, "report_env", None) is not None:
+        value = os.environ.get(options.report_env)
+        shown = "<unset>" if value is None else value
+        return f"{options.report_env}={shown}"
+    if getattr(options, "report_cwd", False):
+        return os.getcwd()
+    return str(text)
+
+
 def _call_tool(name: object, arguments: object, options: argparse.Namespace, state: dict) -> dict:
     if name == "echo":
         text = arguments.get("text", "") if isinstance(arguments, dict) else ""
-        return _text_block(str(text))
+        return _text_block(_echo_text(options, text))
     if name == "boom":
         result = _text_block("boom")
         result["isError"] = True
@@ -470,6 +496,16 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--grandchild")
     parser.add_argument("--emit", choices=("whole", "split", "coalesce"), default="whole")
     parser.add_argument("--sleep-before-reply", type=float, default=0.0)
+    parser.add_argument(
+        "--report-env",
+        metavar="NAME",
+        help="echo answers with NAME=<value> from this process's environment (m10d).",
+    )
+    parser.add_argument(
+        "--report-cwd",
+        action="store_true",
+        help="echo answers with this process's working directory (m10d).",
+    )
     return parser.parse_args(argv)
 
 
