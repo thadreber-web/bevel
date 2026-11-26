@@ -44,6 +44,11 @@ Flags
         or write two frames in a single ``write()``.
     ``--sleep-before-reply SECONDS``
         Delay the ``tools/call`` reply, for the call-stage timeout.
+    ``--adversarial-tools``
+        Append the deliberately-broken descriptors to ``tools/list``. The
+        default list is pinned by m10b (``test_mcp_stdio.py`` asserts it is
+        exactly ``TOOL_NAMES``), so anything designed to be refused by the
+        bridge lives behind this flag rather than in the default payload.
 
 The environment is inherited and deliberately not consulted: every knob is a
 flag, so a test's intent is visible in the argv it spawns with.
@@ -75,6 +80,18 @@ KNOWN_METHODS = (
 )
 
 TOOL_NAMES = ("echo", "boom", "methods", "read_note")
+
+#: Adversarial tools that are *callable*: each echoes what it was given so a
+#: test can prove the bridge put the server's own name on the wire, not the
+#: namespaced one it offers to the model.
+CALLABLE_ADVERSARIAL_TOOLS = (
+    "Bad Name!",
+    "no_schema",
+    "loose_extras",
+    "undescribed",
+    "my-tool",
+    "my_tool",
+)
 
 #: Runs as the grandchild. Appends ``<pid> <monotonic-ish timestamp>`` until it
 #: is killed, so a test can prove both that it was alive and that it stopped.
@@ -111,48 +128,149 @@ def log(text: str) -> None:
     sys.stderr.flush()
 
 
-def _tools_payload() -> dict[str, object]:
+def _plain_descriptor(name: str, description: str) -> dict[str, object]:
+    """A well-formed descriptor: one string argument, extras rejected."""
     return {
-        "tools": [
-            {
-                "name": "echo",
-                "description": "Return the text you gave me.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {"text": {"type": "string"}},
-                    "required": ["text"],
-                    "additionalProperties": False,
-                },
-            },
-            {
-                "name": "boom",
-                "description": "Always fail, the way a real tool fails.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {},
-                    "additionalProperties": False,
-                },
-            },
-            {
-                "name": "methods",
-                "description": "List the JSON-RPC methods this server has received.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {},
-                    "additionalProperties": False,
-                },
-            },
-            {
-                "name": "read_note",
-                "description": "Read the fixture's one resource.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {},
-                    "additionalProperties": False,
-                },
-            },
-        ]
+        "name": name,
+        "description": description,
+        "inputSchema": {
+            "type": "object",
+            "properties": {"text": {"type": "string", "description": "The text."}},
+            "required": ["text"],
+            "additionalProperties": False,
+        },
     }
+
+
+def _adversarial_descriptors() -> list[dict[str, object]]:
+    """The descriptors a real third-party server gets wrong, one way each.
+
+    Served only with ``--adversarial-tools``. The bridge must refuse each of
+    these on its own and keep offering its siblings, so they are listed in one
+    payload rather than one flag each: the property under test is that one bad
+    descriptor does not sink the server.
+    """
+    return [
+        # Must be sanitised into something the endpoint accepts, not refused.
+        _plain_descriptor("Bad Name!", "A name no endpoint would accept as sent."),
+        # Must be offered with a schema call_tool can actually validate.
+        {
+            "name": "no_schema",
+            "description": "Advertises no inputSchema at all.",
+        },
+        # Must be offered with additionalProperties forced to false.
+        {
+            "name": "loose_extras",
+            "description": "Permits arguments it never declared.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {"text": {"type": "string", "description": "The text."}},
+                "additionalProperties": True,
+            },
+        },
+        # Each of the three below carries a keyword bevel's validator does not
+        # enforce, so its constraints would silently not apply. Refuse them.
+        {
+            "name": "ref_tool",
+            "description": "Points its schema at a $ref nobody can resolve.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {"text": {"$ref": "#/definitions/Text"}},
+            },
+        },
+        {
+            "name": "any_of_tool",
+            "description": "Accepts one of several shapes.",
+            "inputSchema": {
+                "anyOf": [
+                    {"type": "object", "properties": {"a": {"type": "string"}}},
+                    {"type": "object", "properties": {"b": {"type": "string"}}},
+                ]
+            },
+        },
+        {
+            "name": "pattern_tool",
+            "description": "Constrains a property with a regex.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {"text": {"type": "string", "pattern": "^[a-z]+$"}},
+            },
+        },
+        # Unusable descriptors: refused, and their siblings must survive.
+        {
+            # No name member at all.
+            "description": "Has no name member.",
+            "inputSchema": {"type": "object", "properties": {}},
+        },
+        {
+            "name": "blank_description",
+            "description": "",
+            "inputSchema": {"type": "object", "properties": {}},
+        },
+        {
+            "name": "schema_not_object",
+            "description": "Sends a schema where a schema should be.",
+            "inputSchema": "everything goes",
+        },
+        {
+            "name": "undescribed",
+            "description": "Declares a parameter nobody may explain.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {"text": {"type": "string"}},
+                "required": ["text"],
+                "additionalProperties": False,
+            },
+        },
+        # The pair that collides once both are sanitised.
+        _plain_descriptor("my-tool", "Hyphenated twin."),
+        _plain_descriptor("my_tool", "Underscored twin."),
+    ]
+
+
+def _tools_payload(options: argparse.Namespace) -> dict[str, object]:
+    tools: list[dict[str, object]] = [
+        {
+            "name": "echo",
+            "description": "Return the text you gave me.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {"text": {"type": "string"}},
+                "required": ["text"],
+                "additionalProperties": False,
+            },
+        },
+        {
+            "name": "boom",
+            "description": "Always fail, the way a real tool fails.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {},
+                "additionalProperties": False,
+            },
+        },
+        {
+            "name": "methods",
+            "description": "List the JSON-RPC methods this server has received.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {},
+                "additionalProperties": False,
+            },
+        },
+        {
+            "name": "read_note",
+            "description": "Read the fixture's one resource.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {},
+                "additionalProperties": False,
+            },
+        },
+    ]
+    if getattr(options, "adversarial_tools", False):
+        tools.extend(_adversarial_descriptors())
+    return {"tools": tools}
 
 
 def _text_block(text: str) -> dict[str, object]:
@@ -173,6 +291,11 @@ def _call_tool(name: object, arguments: object, options: argparse.Namespace, sta
         return _text_block(json.dumps(list(state["methods"])))
     if name == "read_note":
         return _text_block(RESOURCE_TEXT)
+    if name in CALLABLE_ADVERSARIAL_TOOLS:
+        # Echoes what actually arrived, so a test can prove the bridge sent the
+        # server's own name on the wire rather than the namespaced one it
+        # offered the model, and forwarded the arguments untouched.
+        return _text_block(json.dumps({"name": name, "arguments": arguments}))
     return {"isError": True, "content": [{"type": "text", "text": f"unknown tool {name!r}"}]}
 
 
@@ -191,7 +314,7 @@ def _answer_initialize(request_id: object, options: argparse.Namespace) -> None:
 def _answer_tools_list(request_id: object, options: argparse.Namespace) -> None:
     if options.hang == "tools-list":
         return
-    frame = json.dumps({"jsonrpc": "2.0", "id": request_id, "result": _tools_payload()})
+    frame = json.dumps({"jsonrpc": "2.0", "id": request_id, "result": _tools_payload(options)})
     if options.emit == "split":
         # Half a frame now, the rest later: one os.read is not one frame.
         half = len(frame) // 2
@@ -209,7 +332,7 @@ def _answer_tools_list(request_id: object, options: argparse.Namespace) -> None:
         # One write, two frames: the client's framing has to separate them.
         write_raw(frame + "\n" + noise + "\n")
     else:
-        emit({"jsonrpc": "2.0", "id": request_id, "result": _tools_payload()})
+        emit({"jsonrpc": "2.0", "id": request_id, "result": _tools_payload(options)})
 
 
 def _answer_tools_call(
@@ -338,6 +461,11 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--stderr-lines", type=int, default=0)
     parser.add_argument("--stderr-bytes", type=int, default=0)
     parser.add_argument("--is-error", action="store_true")
+    parser.add_argument(
+        "--adversarial-tools",
+        action="store_true",
+        help="Append the deliberately-broken descriptors to tools/list (m10c).",
+    )
     parser.add_argument("--protocol", default=PROTOCOL_VERSION)
     parser.add_argument("--grandchild")
     parser.add_argument("--emit", choices=("whole", "split", "coalesce"), default="whole")
