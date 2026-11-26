@@ -122,6 +122,27 @@ class McpServers:
         """One per configured server, in config order; still there after closing."""
         return self._reports
 
+    def transport(self, name: str) -> Transport | None:
+        """The live transport for one server, or ``None``.
+
+        m10f added this because the resource tools reach a server by name, and
+        the name is model-supplied text rather than a config key. It is a lookup,
+        not a constructor: there is no way to get a transport out of here that
+        :func:`start_servers` did not already start, and after :meth:`aclose`
+        empties the list no name resolves, so a closed server cannot be
+        resurrected by a tool call.
+
+        ``None`` covers three different facts -- never configured, disabled, and
+        closed -- which is why callers must read the :attr:`reports` too rather
+        than treat a miss as "this server has nothing".
+        :func:`~bevel.mcp.resources._resolve` is the one caller and does exactly
+        that.
+        """
+        for transport, report in self._transports:
+            if report.name == name:
+                return transport
+        return None
+
     async def aclose(self) -> None:
         """Close every transport, including the ones that failed part-way.
 

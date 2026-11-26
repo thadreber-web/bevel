@@ -475,13 +475,11 @@ def _resource_descriptor(uri: str, name: str, description: str, mime_type: str) 
     return {"uri": uri, "name": name, "description": description, "mimeType": mime_type}
 
 
-def _answer_resources_read(
-    request_id: object, params: object, options: argparse.Namespace
-) -> None:
+def _answer_resources_read(request_id: object, params: object, options: argparse.Namespace) -> None:
     if options.hang == "resources-read":
         return
     wanted = params.get("uri") if isinstance(params, dict) else None
-    if wanted != RESOURCE_URI:
+    if wanted != RESOURCE_URI and not (options.resources_read == "blob" and wanted == BLOB_URI):
         # The one refusal every mode shares: a URI this server does not hold.
         # ``--resources-read gone`` reaches it through a URI it advertised
         # itself, which is the case that looks like bevel's bug.
@@ -542,9 +540,7 @@ def _answer_resources_read(
         {
             "jsonrpc": "2.0",
             "id": request_id,
-            "result": {
-                "contents": [{"uri": RESOURCE_URI, "mimeType": "text/plain", "text": text}]
-            },
+            "result": {"contents": [{"uri": RESOURCE_URI, "mimeType": "text/plain", "text": text}]},
         }
     )
 
@@ -571,9 +567,7 @@ def _answer_resources_list(request_id: object, options: argparse.Namespace) -> N
         )
         return
     resources = [
-        _resource_descriptor(
-            RESOURCE_URI, "notes", "The fixture's one resource.", "text/plain"
-        )
+        _resource_descriptor(RESOURCE_URI, "notes", "The fixture's one resource.", "text/plain")
     ]
     if mode == "junk":
         # One broken descriptor alongside the good one: no uri at all. The

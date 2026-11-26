@@ -61,7 +61,8 @@ The decisions, and why:
 
 Not built here, and the slice that delivers each: config and ``bevel mcp`` are
 m10d, streamable-HTTP is m10e, and ``resources/list`` / ``resources/read`` are
-m10f.
+m10f -- :mod:`bevel.mcp.resources`, which reuses :class:`StartedTransport` and
+:func:`_render_blocks` from here rather than growing a second of either.
 """
 
 from __future__ import annotations

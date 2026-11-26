@@ -944,6 +944,112 @@ class TestMcp:
         assert "nonsense" in err
         assert "bevel.toml" in err
 
+    # --- bevel mcp resources <server> ---------------------------------------
+
+    def test_resources_lists_the_uris_a_live_server_offers(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """The human path and the model path share one code path, so both must really ask."""
+        self._configure(tmp_path, monkeypatch, self._fixture_table())
+        assert main(["mcp", "resources", "fixture"]) == 0
+        out = capsys.readouterr().out
+        assert "bevel://fixture/notes" in out
+        assert "notes" in out
+        assert "The fixture's one resource." in out
+        assert "text/plain" in out
+
+    def test_resources_on_a_server_with_no_resources_says_so_and_exits_zero(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """An honest empty list is an answer, not a failure -- and not a blank line."""
+        self._configure(
+            tmp_path,
+            monkeypatch,
+            self._fixture_table_with_flags("--resources-list", "empty"),
+        )
+        assert main(["mcp", "resources", "fixture"]) == 0
+        out = capsys.readouterr().out
+        assert "no resources" in out.lower()
+        assert out.strip(), "a blank line cannot be told apart from a broken command"
+
+    def test_resources_on_a_down_server_fails_naming_the_reason(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """Down is not empty. Printing an empty list here would be the worst answer."""
+        self._configure(
+            tmp_path,
+            monkeypatch,
+            '[mcp.servers.broken]\ncommand = "definitely-not-a-program"\n',
+        )
+        assert main(["mcp", "resources", "broken"]) == 2
+        err = capsys.readouterr().err
+        assert "definitely-not-a-program" in err
+        assert "no resources" not in err.lower()
+
+    def test_resources_on_a_disabled_server_says_disabled(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        self._configure(tmp_path, monkeypatch, self._fixture_table(enabled="false"))
+        assert main(["mcp", "resources", "fixture"]) == 2
+        err = capsys.readouterr().err
+        assert "disabled" in err
+        assert "no resources" not in err.lower()
+
+    def test_resources_on_an_unknown_server_names_the_ones_that_are(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        self._configure(tmp_path, monkeypatch, self._fixture_table())
+        assert main(["mcp", "resources", "typo"]) == 2
+        err = capsys.readouterr().err
+        assert "typo" in err
+        assert "fixture" in err, "the user needs to know what they could have typed"
+
+    def test_resources_without_a_server_name_is_a_usage_error(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        self._configure(tmp_path, monkeypatch, self._fixture_table())
+        assert main(["mcp", "resources"]) == 2
+        assert "which server" in capsys.readouterr().err
+
+    def test_resources_with_no_servers_configured_says_where_to_add_one(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        self._configure(tmp_path, monkeypatch, "")
+        assert main(["mcp", "resources", "fixture"]) == 2
+        err = capsys.readouterr().err
+        assert "no MCP servers configured" in err
+        assert "bevel.toml" in err
+
+    def _fixture_table_with_flags(self, *flags: str) -> str:
+        """The fixture's table with extra argv, for driving one of its failure modes."""
+        lines = [
+            "[mcp.servers.fixture]",
+            f"command = {json.dumps(sys.executable)}",
+            f"args = [{', '.join(json.dumps(str(item)) for item in (FIXTURE, *flags))}]",
+        ]
+        return "\n".join(lines)
+
 
 class TestUnknownInput:
     def test_unknown_command_is_rejected(self) -> None:

@@ -1,8 +1,9 @@
 """Model Context Protocol client.
 
 What exists today is the wire, two ways to carry it, the bridge that turns a
-server's advertised tools into tools the model is offered, and the layer that
-starts configured servers and stops them again.
+server's advertised tools into tools the model is offered, the resources calls
+and the two tools that consume them, and the layer that starts configured
+servers and stops them again.
 :mod:`bevel.mcp.jsonrpc` is the JSON-RPC 2.0 core (m10a): request, notification
 and response envelopes, id allocation, the spec's error codes, and
 request/response pairing over an abstract
@@ -97,12 +98,23 @@ against the same fixture driven with ``--http``, which enforces the header rules
 by *refusing* non-compliant requests rather than echoing them; see
 ``tests/unit/test_mcp_http.py``.
 
-What does not exist yet, and the slice that delivers each:
+What exists today, and the last piece of it:
 
 ``resources.py``
-    m10f -- ``resources/list`` and ``resources/read``, plus the two
-    model-facing tools that actually put a fetched resource in front of the
-    model.
+    m10f -- shipped. ``resources/list`` and ``resources/read`` over an
+    already-started transport, and the two model-facing tools that put a fetched
+    resource in front of the model: ``mcp_resources(server)`` and
+    ``mcp_read(server, uri)``. Both are ``READ`` and parallel-safe, both are
+    global rather than per-server (N servers cost two schemas, not 2N), neither
+    is ever in ``core/tools/registry.py``, and both reach a server through
+    :meth:`~bevel.mcp.servers.McpServers.transport` so a closed transport cannot
+    be resurrected by a tool call. Content is capped at
+    :data:`~bevel.mcp.resources.MAX_RESOURCE_CHARS` and the truncation announces
+    itself; a binary resource is described, not decoded. **Resource content is
+    untrusted text from the server entering the transcript, and bevel has no
+    prompt-injection defence beyond the policy engine that gates the call** --
+    see the module docstring. ``bevel mcp resources <server>`` runs the same tool
+    for a human.
 
 The plan stays inside the three-runtime-dependency rule: JSON-RPC is
 hand-rolled rather than the official SDK, which pulls in ``pydantic-core`` (a

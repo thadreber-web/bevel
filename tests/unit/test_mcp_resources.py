@@ -31,18 +31,20 @@ What this file holds to account:
 from __future__ import annotations
 
 import asyncio
+import re
 import sys
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+from bevel.config.schema import McpServerConfig
 from bevel.core.agent import Agent
 from bevel.core.policy import allow_all_policy
 from bevel.core.tools import registry
 from bevel.core.tools.base import RiskTier, Tool, ToolContext, ToolResult, call_tool
 from bevel.core.tools.schema import unsupported_keywords
-from bevel.config.schema import McpServerConfig
+from bevel.mcp.http import HttpTransport
 from bevel.mcp.jsonrpc import RemoteError
 from bevel.mcp.resources import (
     MAX_RESOURCE_CHARS,
@@ -133,9 +135,7 @@ async def test_read_resource_returns_the_text(tmp_path: Path) -> None:
         content = await read_resource(transport, RESOURCE_URI)
     finally:
         await transport.close()
-    assert content == ResourceContent(
-        uri=RESOURCE_URI, mime_type="text/plain", text=RESOURCE_TEXT
-    )
+    assert content == ResourceContent(uri=RESOURCE_URI, mime_type="text/plain", text=RESOURCE_TEXT)
     assert content.truncated is False
     assert content.is_error is False
 
@@ -207,6 +207,23 @@ async def test_a_resource_with_no_name_or_description_is_still_listed(tmp_path: 
     finally:
         await transport.close()
     assert refs == (ResourceRef(uri=RESOURCE_URI, name="", description=None, mime_type=None),)
+
+
+async def test_a_resource_entry_is_not_a_content_block(tmp_path: Path) -> None:
+    """The two shapes are different, and the block renderer would mangle this one.
+
+    ``tools/call`` blocks are tagged ``{"type": "text"}``; ``resources/read``
+    entries carry ``uri``/``mimeType``/``text`` and no ``type`` at all. Running
+    the latter through :func:`~bevel.mcp.bridge._render_blocks` would report every
+    real resource as ``[malformed content omitted by bevel]``.
+    """
+    transport = await _transport(tmp_path)
+    try:
+        content = await read_resource(transport, RESOURCE_URI)
+    finally:
+        await transport.close()
+    assert content.text == RESOURCE_TEXT
+    assert "omitted by bevel" not in content.text
 
 
 async def test_a_read_of_an_unknown_uri_raises_a_remote_error(tmp_path: Path) -> None:
@@ -291,11 +308,7 @@ async def test_large_content_is_capped(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-async def _start_http(
-    tmp_path: Path, *flags: str
-) -> tuple[Any, asyncio.subprocess.Process]:
-    from bevel.mcp.http import HttpTransport
-
+async def _start_http(tmp_path: Path, *flags: str) -> tuple[Any, asyncio.subprocess.Process]:
     port_file = tmp_path / "port"
     argv = [sys.executable, str(FIXTURE), "--http", "--port-file", str(port_file), *flags]
     proc = await asyncio.create_subprocess_exec(
@@ -394,8 +407,6 @@ async def test_both_tools_are_read_tier_and_parallel_safe() -> None:
 
 async def test_the_tool_schemas_are_wire_safe() -> None:
     """Nothing in ``test_tools_registry.py`` looks at these, so this file has to."""
-    import re
-
     servers = await _started()
     try:
         for name in ("mcp_resources", "mcp_read"):
@@ -471,20 +482,12 @@ async def test_a_model_can_list_and_read_in_one_run() -> None:
         turns=[
             ScriptedTurn(
                 tool_calls=[
-                    {
-                        "id": "c1",
-                        "name": "mcp_resources",
-                        "arguments": {"server": "fixture"},
-                    }
+                    tool_call("c1", "mcp_resources", {"server": "fixture"}),
                 ]
             ),
             ScriptedTurn(
                 tool_calls=[
-                    {
-                        "id": "c2",
-                        "name": "mcp_read",
-                        "arguments": {"server": "fixture", "uri": RESOURCE_URI},
-                    }
+                    tool_call("c2", "mcp_read", {"server": "fixture", "uri": RESOURCE_URI}),
                 ]
             ),
             ScriptedTurn(content="done"),
@@ -505,7 +508,7 @@ async def test_a_model_can_list_and_read_in_one_run() -> None:
 
     sent = provider.requests[-1]["messages"]
     assert isinstance(sent, list)
-    observed = [str(m.get("content", "")) for m in sent if m.get("role") == "tool"]
+    observed = [message.content for message in sent if message.role == "tool"]
     assert any(RESOURCE_TEXT in text for text in observed), (
         "the fetched resource never reached the model, which is the whole slice"
     )
@@ -602,6 +605,23 @@ async def test_a_read_the_server_refuses_is_a_failure_naming_server_and_uri() ->
         await servers.aclose()
 
 
+async def test_a_failure_quotes_what_the_server_wrote_to_stderr() -> None:
+    """The reuse of ``StartedTransport.stderr_tail``, pinned.
+
+    The bridge quotes it for the same reason: a JSON-RPC error code tells the
+    model nothing it can act on, and the server's own last words usually do.
+    HTTP answers the same property with its last error body, which is why one
+    message works for both transports.
+    """
+    servers = await _started("--resources-read", "gone", "--stderr-lines", "2")
+    try:
+        result = await _call(servers, "mcp_read", server="fixture", uri=GONE_URI)
+        assert result.failed
+        assert "fixture stderr line 0" in (result.error or "")
+    finally:
+        await servers.aclose()
+
+
 async def test_an_is_error_read_is_a_failure_the_model_can_read() -> None:
     servers = await _started("--resources-read", "error")
     try:
@@ -639,7 +659,7 @@ async def test_a_large_read_is_capped_and_says_it_was_capped() -> None:
         result = await _call(servers, "mcp_read", server="fixture", uri=RESOURCE_URI)
         assert result.ok, result.error
         assert TRUNCATION_MARKER in result.content
-        assert MAX_RESOURCE_CHARS in TRUNCATION_MARKER
+        assert str(MAX_RESOURCE_CHARS) in TRUNCATION_MARKER
         assert len(result.content) < MAX_RESOURCE_CHARS + 512
     finally:
         await servers.aclose()

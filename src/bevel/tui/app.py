@@ -58,6 +58,7 @@ from bevel.core.session.resume import ResumedSession, rebuild_transcript
 from bevel.core.session.store import SessionStore, StoredToolCall, TodoStore
 from bevel.core.tools.base import ToolResult
 from bevel.core.tools.registry import tools as builtin_tools
+from bevel.mcp.resources import resource_tools
 from bevel.mcp.servers import McpServers, start_servers
 from bevel.providers.base import ModelProvider
 from bevel.providers.registry import Registry
@@ -306,8 +307,12 @@ class BevelApp(App[None]):
                 todos=self.todos,
                 # ``tools`` *replaces* the built-ins rather than extending them,
                 # so the built-ins have to be spelled out here -- bridging a
-                # server must not leave the model unable to read a file.
-                tools=[*builtin_tools(), *servers.tools],
+                # server must not leave the model unable to read a file. The two
+                # resource tools are global rather than one pair per server, so
+                # N servers cost two schemas and not 2N, and neither is ever in
+                # the registry: a remote server must not change what the static
+                # built-in list says.
+                tools=[*builtin_tools(), *servers.tools, *resource_tools(servers)],
             )
             self._agent = agent
             async for event in agent.stream(task):

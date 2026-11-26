@@ -35,11 +35,15 @@ _PENDING: dict[str, str] = {
     "eval": "m13 (eval harness)",
 }
 
-#: What ``bevel mcp`` accepts. Only ``list`` is built; there is no ``start`` or
-#: ``restart`` because a server's lifetime belongs to a run, not to a CLI
-#: command that would leave a process behind when the shell exited. m10f adds
-#: ``"resources"`` here when ``resources/list`` and ``resources/read`` land.
-_MCP_ACTIONS: tuple[str, ...] = ("list",)
+#: What ``bevel mcp`` accepts. ``resources`` is m10f and shares
+#: :func:`~bevel.mcp.resources.list_resources` with the model-facing tool, so a
+#: human and a model ask the server the same question the same way. There is no
+#: ``read`` here: a resource is worth looking at once the model has listed them,
+#: and a CLI that printed the whole body would be the one place bevel ignores its
+#: own cap. There is no ``start`` or ``restart`` because a server's lifetime
+#: belongs to a run, not to a CLI command that would leave a process behind when
+#: the shell exited.
+_MCP_ACTIONS: tuple[str, ...] = ("list", "resources")
 
 #: What ``bevel memories`` accepts. All three are built, so anything else is a
 #: usage error argparse rejects with exit 2 rather than a stub that pretends.
@@ -92,6 +96,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     mcp = subparsers.add_parser("mcp", help="inspect the configured MCP servers")
     mcp.add_argument("action", nargs="?", choices=_MCP_ACTIONS, help="what to do")
+    # Positional, not an option: TestMcp rejects an option this code would not
+    # act on, and `resources` is the only action that needs a target.
+    mcp.add_argument(
+        "server",
+        nargs="?",
+        help="server name from the [mcp.servers.<name>] table (required for 'resources')",
+    )
     for name in _PENDING:
         subparsers.add_parser(name, help=f"(planned) {name}")
     return parser
@@ -353,8 +364,8 @@ def _todos(named: str | None, out: IO[str], err: IO[str]) -> int:
         store.close()
 
 
-def _mcp(action: str | None, out: IO[str], err: IO[str]) -> int:
-    """``bevel mcp list``: what the ``[mcp.servers]`` tables actually do.
+def _mcp(action: str | None, server: str | None, out: IO[str], err: IO[str]) -> int:
+    """``bevel mcp list`` / ``bevel mcp resources <server>``.
 
     There is no ``start``/``stop``. A server's lifetime belongs to a run -- the
     TUI spawns them at the start of a turn sequence and kills the whole tree when
@@ -362,8 +373,10 @@ def _mcp(action: str | None, out: IO[str], err: IO[str]) -> int:
     be a process leak with a friendly name.
     """
     if action is None:
-        err.write("bevel mcp: expected an action: list.\n")
+        err.write("bevel mcp: expected an action: list, resources.\n")
         return 2
+    if action == "resources":
+        return _mcp_resources(server, out, err)
     return _mcp_list(out, err)
 
 
@@ -412,6 +425,68 @@ def _mcp_list(out: IO[str], err: IO[str]) -> int:
     up = sum(1 for report in reports if report.handshook)
     out.write(f"\n  {up} of {len(reports)} server(s) answered\n")
     return 0
+
+
+def _mcp_resources(server: str | None, out: IO[str], err: IO[str]) -> int:
+    """``bevel mcp resources <server>``: the same call the model makes.
+
+    It runs :class:`~bevel.mcp.resources.McpResourcesTool` rather than a second
+    printing path, so a human and a model ask the server the same question the
+    same way and cannot get different answers. Down, disabled, and empty are
+    three different sentences because they are three different facts; a blank
+    line for all three would send a user off to debug the wrong thing.
+
+    Exits 2 when the server could not be reached and 0 when it answered, empty or
+    not -- same rule as ``list``, where reporting a down server truthfully is the
+    command succeeding, and a server with nothing to offer answered the question.
+    """
+    from .config.loader import load  # noqa: PLC0415
+    from .config.schema import ConfigError  # noqa: PLC0415
+
+    if server is None:
+        err.write(
+            "bevel mcp resources: which server? Pass its name: bevel mcp resources <server>.\n"
+        )
+        return 2
+
+    try:
+        config = load()
+    except ConfigError as exc:
+        err.write(f"bevel mcp resources: {exc}\n")
+        return 2
+
+    if not config.mcp_servers:
+        err.write(
+            "bevel mcp resources: no MCP servers configured, so there is no server to ask.\n"
+            "  Add a [mcp.servers.<name>] table; see bevel.toml.example for every key.\n"
+        )
+        return 2
+
+    content, error = asyncio.run(_list_one(config.mcp_servers, server))
+    if error is not None:
+        err.write(f"bevel mcp resources: {error}\n")
+        return 2
+    out.write(f"{content}\n")
+    return 0
+
+
+async def _list_one(servers: Mapping[str, McpServerConfig], name: str) -> tuple[str, str | None]:
+    """Start, ask one server for its resources, and close everything again.
+
+    One event loop, and the ``finally`` is the point: these are this process's
+    own children and they must be gone when the command prints.
+    """
+    from .core.tools.base import ToolContext, call_tool  # noqa: PLC0415
+    from .mcp.resources import McpResourcesTool  # noqa: PLC0415
+    from .mcp.servers import start_servers  # noqa: PLC0415
+
+    started = await start_servers(servers)
+    try:
+        tool = McpResourcesTool(started)
+        result = await call_tool(tool, {"server": name}, ToolContext(workspace=Path.cwd()))
+        return result.content, result.error
+    finally:
+        await started.aclose()
 
 
 async def _collect_reports(servers: Mapping[str, McpServerConfig]) -> tuple[ServerReport, ...]:
@@ -477,7 +552,7 @@ def main(argv: Sequence[str] | None = None) -> int:  # noqa: PLR0911 - one exit 
         return _todos(args.session, sys.stdout, sys.stderr)
 
     if args.command == "mcp":
-        return _mcp(args.action, sys.stdout, sys.stderr)
+        return _mcp(args.action, args.server, sys.stdout, sys.stderr)
 
     if args.command in _PENDING:
         return _not_implemented(args.command, sys.stderr)
