@@ -413,7 +413,7 @@ async def test_refusals_are_logged_where_a_human_will_find_them(
             assert all(r.levelname == "WARNING" for r in caplog.records)
             text = "\n".join(r.getMessage() for r in caplog.records)
             for refusal in server.refusals:
-                assert refusal.remote_name in text or refusal.remote_name is None
+                assert refusal.remote_name is None or refusal.remote_name in text
             assert "fixture" in text, "the log line does not name the server"
         finally:
             await transport.close()
