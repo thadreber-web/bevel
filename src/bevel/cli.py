@@ -12,9 +12,9 @@ from __future__ import annotations
 import argparse
 import asyncio
 import sys
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
-from typing import IO
+from typing import IO, TYPE_CHECKING
 
 from . import __version__
 from ._capability import CapabilityReport, probe
@@ -22,15 +22,24 @@ from .core.checkpoint import restore
 from .core.memory.store import MemoryStore
 from .core.session.store import SessionInfo, SessionStore, TodoStatus, TodoStore
 
+if TYPE_CHECKING:
+    from .config.schema import McpServerConfig
+    from .mcp.servers import ServerReport
+
 #: Subcommands that are planned but not built yet, mapped to the milestone
 #: that delivers them. Kept in one place so ``--help`` and the stub message
 #: cannot drift apart.
 _PENDING: dict[str, str] = {
-    "mcp": "m10 (MCP client)",
     "pr": "m11 (git and PR operations)",
     "sandbox": "m12 (sandbox backends)",
     "eval": "m13 (eval harness)",
 }
+
+#: What ``bevel mcp`` accepts. Only ``list`` is built; there is no ``start`` or
+#: ``restart`` because a server's lifetime belongs to a run, not to a CLI
+#: command that would leave a process behind when the shell exited. m10f adds
+#: ``"resources"`` here when ``resources/list`` and ``resources/read`` land.
+_MCP_ACTIONS: tuple[str, ...] = ("list",)
 
 #: What ``bevel memories`` accepts. All three are built, so anything else is a
 #: usage error argparse rejects with exit 2 rather than a stub that pretends.
@@ -81,6 +90,8 @@ def build_parser() -> argparse.ArgumentParser:
         nargs="?",
         help="session id or prefix (default: the most recent session for this directory)",
     )
+    mcp = subparsers.add_parser("mcp", help="inspect the configured MCP servers")
+    mcp.add_argument("action", nargs="?", choices=_MCP_ACTIONS, help="what to do")
     for name in _PENDING:
         subparsers.add_parser(name, help=f"(planned) {name}")
     return parser
@@ -342,6 +353,82 @@ def _todos(named: str | None, out: IO[str], err: IO[str]) -> int:
         store.close()
 
 
+def _mcp(action: str | None, out: IO[str], err: IO[str]) -> int:
+    """``bevel mcp list``: what the ``[mcp.servers]`` tables actually do.
+
+    There is no ``start``/``stop``. A server's lifetime belongs to a run -- the
+    TUI spawns them at the start of a turn sequence and kills the whole tree when
+    it ends -- and a CLI that left a server running after the shell exited would
+    be a process leak with a friendly name.
+    """
+    if action is None:
+        err.write("bevel mcp: expected an action: list.\n")
+        return 2
+    return _mcp_list(out, err)
+
+
+def _mcp_list(out: IO[str], err: IO[str]) -> int:
+    """Spawn every configured server, report, and tear it all down again.
+
+    The servers are really started. A list command that read the config and
+    printed it back would tell you your TOML is well-formed and nothing else,
+    which is not the question -- the question is whether the server answers, and
+    only asking it can say so.
+
+    A server that will not start is reported and exits 0: telling the truth about
+    a down server *is* this command succeeding. A config that cannot be read
+    exits 2, because then nothing was reported faithfully.
+    """
+    from .config.loader import load  # noqa: PLC0415
+    from .config.schema import ConfigError  # noqa: PLC0415
+
+    try:
+        config = load()
+    except ConfigError as exc:
+        err.write(f"bevel mcp list: {exc}\n")
+        return 2
+
+    if not config.mcp_servers:
+        out.write(
+            "bevel mcp list: no MCP servers configured.\n"
+            "  Add a [mcp.servers.<name>] table to bevel.toml or ~/.config/bevel/config.toml;\n"
+            "  'command' is the only required key. See bevel.toml.example for every key.\n"
+        )
+        return 0
+
+    reports = asyncio.run(_collect_reports(config.mcp_servers))
+    out.write(f"{'server':<17}{'state':<10}{'status':<7}tools\n")
+    for report in reports:
+        state = "enabled" if report.enabled else "disabled"
+        status = "up" if report.handshook else ("down" if report.enabled else "-")
+        tools = ", ".join(name.split("__", 1)[-1] for name in report.tools) or "none"
+        out.write(f"{report.name:<17}{state:<10}{status:<7}{tools}\n")
+        out.write(f"{'':17}command: {' '.join(report.command)}\n")
+        if report.error:
+            out.write(f"{'':17}{report.error}\n")
+        for refusal in report.refusals:
+            out.write(f"{'':17}refused: {refusal.reason}\n")
+    up = sum(1 for report in reports if report.handshook)
+    out.write(f"\n  {up} of {len(reports)} server(s) answered\n")
+    return 0
+
+
+async def _collect_reports(servers: Mapping[str, McpServerConfig]) -> tuple[ServerReport, ...]:
+    """Start, report, and close in one event loop.
+
+    The ``finally`` is the reason this is a separate coroutine rather than two
+    ``asyncio.run`` calls: the close has to happen on the loop that spawned the
+    children, and it has to happen even if reading the reports raised.
+    """
+    from .mcp.servers import start_servers  # noqa: PLC0415
+
+    started = await start_servers(servers)
+    try:
+        return started.reports
+    finally:
+        await started.aclose()
+
+
 def _resume(named: str | None) -> int:
     """Reopen a session in the TUI: a named one, or the most recent for here."""
     from .config.loader import session_db_path  # noqa: PLC0415
@@ -387,6 +474,9 @@ def main(argv: Sequence[str] | None = None) -> int:  # noqa: PLR0911 - one exit 
 
     if args.command == "todos":
         return _todos(args.session, sys.stdout, sys.stderr)
+
+    if args.command == "mcp":
+        return _mcp(args.action, sys.stdout, sys.stderr)
 
     if args.command in _PENDING:
         return _not_implemented(args.command, sys.stderr)

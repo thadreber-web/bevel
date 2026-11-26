@@ -144,6 +144,47 @@ model = "Qwen2.5-Coder-32B-Instruct"
 # `bevel policy` command to read it yet; the table is `decisions`.
 
 # ---------------------------------------------------------------------------
+# MCP servers: tools from someone else's process
+# ---------------------------------------------------------------------------
+#
+# Each [mcp.servers.<name>] table describes one stdio MCP server bevel spawns
+# at the start of a run and bridges into the tool list. <name> becomes the
+# prefix on every tool it contributes -- a server named `fs` offering `read`
+# shows up to the model as `fs__read` -- so it must be letters, digits, '.',
+# '_' or '-', starting with a letter or digit.
+#
+# command, args, cwd are used as argv directly and never through a shell, so
+# there is no quoting to get wrong here. `command` is the only required key.
+#
+# TRAP: `env` is merged INTO the environment bevel was started with, it does
+# not replace it. A stdio server spawned with a bare environment has no PATH,
+# which on Windows means it fails to start for a reason you cannot see. So
+# these entries add to and override what you already have; there is no way to
+# ask for an empty environment.
+#
+# `timeout` is one number applied to all three phases: spawning the child,
+# completing the handshake, and each tool call. Raise it for a server that
+# loads a big model at startup.
+#
+# A server that cannot start does not stop the run. It is reported by name
+# with the last lines of its stderr, and everything else still works. Check
+# with `bevel mcp list`, which prints the same report without starting a run.
+# It never prints your env values.
+#
+# [mcp.servers.filesystem]
+# command = "npx"
+# args = ["-y", "@modelcontextprotocol/server-filesystem", "D:/work"]
+# env = { API_TOKEN = "not-a-real-token" }
+# cwd = "D:/work"                 # where the server process starts
+# enabled = true                  # false keeps it out of the run, still listed
+# timeout = 30.0                  # seconds, per spawn / handshake / tool call
+#
+# Two servers whose names sanitise to the same prefix (my-server and my_server)
+# would both claim `my_server__read`, so bevel refuses the colliding tool and
+# says which two servers collided, rather than letting the config's ordering
+# decide which one the model ever sees.
+
+# ---------------------------------------------------------------------------
 # Alternative: no file at all
 # ---------------------------------------------------------------------------
 #

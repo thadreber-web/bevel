@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import tomllib
 from pathlib import Path
 from typing import Any
@@ -27,6 +28,7 @@ from bevel.config.schema import (
     DEFAULT_TIMEOUT,
     Config,
     ConfigError,
+    McpServerConfig,
     MemoryConfig,
     PolicyConfig,
     PolicyMode,
@@ -47,6 +49,13 @@ _POLICY_KEYS = frozenset({"mode", "db_path", "allow", "deny"})
 _POLICY_MODES = tuple(mode.value for mode in PolicyMode)
 
 _MEMORY_KEYS = frozenset({"enabled", "vectors", "auto_accept", "limit", "max_injection_tokens"})
+
+_MCP_KEYS = frozenset({"servers"})
+_MCP_SERVER_KEYS = frozenset({"command", "args", "env", "cwd", "enabled", "timeout"})
+
+#: A server name becomes the tool prefix (``fs__read``) and the handle in
+#: ``bevel mcp list``, so it has to survive both without sanitising.
+_SERVER_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 
 _PROFILE_KEYS = frozenset(
     {
@@ -152,6 +161,7 @@ def load(
 
     policy_raw: dict[str, Any] = {}
     memory_raw: dict[str, Any] = {}
+    mcp_raw: dict[str, dict[str, Any]] = {}
     for path in candidate_files(cwd, explicit=explicit_file, env=environ):
         if not path.is_file():
             continue
@@ -163,6 +173,7 @@ def load(
         _merge_profiles(profiles, data, path)
         _merge_policy(policy_raw, data, path)
         _merge_memory(memory_raw, data, path)
+        _merge_mcp_servers(mcp_raw, data, path)
 
     _apply_env(profiles, environ)
 
@@ -181,6 +192,7 @@ def load(
         sources=tuple(sources),
         policy=_build_policy(policy_raw),
         memory=_build_memory(memory_raw),
+        mcp_servers=_build_mcp_servers(mcp_raw),
     )
 
 
@@ -303,6 +315,101 @@ def _build_memory(raw: dict[str, Any]) -> MemoryConfig:
     :class:`MemoryConfig` is the only place the defaults are written.
     """
     return MemoryConfig(**raw)
+
+
+def _merge_mcp_servers(target: dict[str, dict[str, Any]], data: dict[str, Any], path: Path) -> None:
+    """Fold one file's ``[mcp.servers]`` tables into ``target``, validating as it goes.
+
+    A server is replaced wholesale rather than merged key by key, unlike a
+    profile. The two tables mean different things: a profile is an endpoint
+    described by independent settings, so pinning one key is meaningful on its
+    own, but ``args`` only make sense alongside the ``command`` they belong to.
+    Merging per key would let a project file keep a user's ``--api-key``
+    argument while swapping the binary it is passed to.
+    """
+    section = data.get("mcp")
+    if section is None:
+        return
+    if not isinstance(section, dict):
+        raise ConfigError(f"{path}: [mcp] must be a table")
+    unknown = set(section) - _MCP_KEYS
+    if unknown:
+        raise ConfigError(
+            f"{path}: [mcp] has unknown key(s) {', '.join(sorted(unknown))}; "
+            f"expected one of {', '.join(sorted(_MCP_KEYS))}"
+        )
+    servers = section.get("servers")
+    if servers is None:
+        return
+    if not isinstance(servers, dict):
+        raise ConfigError(f"{path}: [mcp] servers must be a table")
+    for name, raw in servers.items():
+        if not isinstance(name, str) or not _SERVER_NAME_RE.fullmatch(name):
+            raise ConfigError(
+                f"{path}: mcp server name {name!r} is unusable; use letters, digits, '.', '_' or "
+                "'-', starting with a letter or digit, since it becomes the tool prefix"
+            )
+        if not isinstance(raw, dict):
+            raise ConfigError(f"{path}: mcp.servers.{name} must be a table")
+        unknown = set(raw) - _MCP_SERVER_KEYS
+        if unknown:
+            raise ConfigError(
+                f"{path}: mcp.servers.{name} has unknown key(s) {', '.join(sorted(unknown))}; "
+                f"expected one of {', '.join(sorted(_MCP_SERVER_KEYS))}"
+            )
+        target[name] = _validated_server(path, name, raw)
+
+
+def _validated_server(  # noqa: PLR0912 - one branch per configured key
+    path: Path, name: str, raw: dict[str, Any]
+) -> dict[str, Any]:
+    """One server table, checked where it was written so the error can name the file.
+
+    One branch per key rather than a loop over key/type pairs: the messages are
+    all different, and a table of expectations would be a second language to
+    learn to get six error strings.
+    """
+    out: dict[str, Any] = {}
+    command = raw.get("command")
+    if command is None:
+        raise ConfigError(f"{path}: mcp.servers.{name} command is required")
+    if not isinstance(command, str) or not command.strip():
+        raise ConfigError(f"{path}: mcp.servers.{name} command must be a non-empty string")
+    out["command"] = command
+
+    if "args" in raw:
+        args = raw["args"]
+        if not isinstance(args, list) or not all(isinstance(item, str) for item in args):
+            raise ConfigError(f"{path}: mcp.servers.{name} args must be a list of strings")
+        out["args"] = tuple(args)
+    if "env" in raw:
+        env = raw["env"]
+        if not isinstance(env, dict):
+            raise ConfigError(f"{path}: mcp.servers.{name} env must be a table")
+        if not all(isinstance(k, str) and isinstance(v, str) for k, v in env.items()):
+            raise ConfigError(f"{path}: mcp.servers.{name} env values must be strings")
+        out["env"] = dict(env)
+    if "cwd" in raw:
+        cwd = raw["cwd"]
+        if not isinstance(cwd, str) or not cwd.strip():
+            raise ConfigError(f"{path}: mcp.servers.{name} cwd must be a string")
+        out["cwd"] = Path(cwd).expanduser()
+    if "enabled" in raw:
+        enabled = raw["enabled"]
+        if not isinstance(enabled, bool):
+            raise ConfigError(f"{path}: mcp.servers.{name} enabled must be a boolean")
+        out["enabled"] = enabled
+    if "timeout" in raw:
+        timeout = raw["timeout"]
+        if not isinstance(timeout, (int, float)) or isinstance(timeout, bool) or timeout <= 0:
+            raise ConfigError(f"{path}: mcp.servers.{name} timeout must be a positive number")
+        out["timeout"] = float(timeout)
+    return out
+
+
+def _build_mcp_servers(raw: dict[str, dict[str, Any]]) -> dict[str, McpServerConfig]:
+    """Build from the merged tables; :func:`_merge_mcp_servers` validated them already."""
+    return {name: McpServerConfig(**fields) for name, fields in raw.items()}
 
 
 def _apply_env(profiles: dict[str, dict[str, Any]], env: dict[str, str]) -> None:

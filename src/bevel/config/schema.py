@@ -75,6 +75,41 @@ class MemoryConfig:
     max_injection_tokens: int = 600
 
 
+#: Seconds allowed for each phase of an MCP server's startup and each tool call.
+DEFAULT_MCP_TIMEOUT = 30.0
+
+
+@dataclass(frozen=True)
+class McpServerConfig:
+    """One ``[mcp.servers.<name>]`` table: how to spawn one server.
+
+    ``command``/``args``/``cwd`` are used as argv directly -- never through a
+    shell -- so there is no quoting to get wrong and nothing to inject. The
+    server's name is the prefix on every tool it contributes (``fs__read``),
+    which is why the loader insists it be a usable handle.
+
+    ``env`` is *merged into* the parent environment rather than replacing it.
+    A stdio server spawned with a bare ``env`` dict has no ``PATH``, which on
+    Windows means most servers fail to start for a reason the user cannot see.
+    Replacing the environment would be the more secure choice, but it turns a
+    working config into a broken one, and bevel's sandboxing is not this
+    layer's job.
+
+    ``timeout`` is one number applied to all three phases of the transport
+    (spawn, handshake, tool call). Splitting it into three keys would be three
+    more things to configure and nobody has yet hit a case where they differ.
+    """
+
+    command: str
+    args: tuple[str, ...] = ()
+    env: dict[str, str] = field(default_factory=dict)
+    cwd: Path | None = None
+    #: A disabled server is still listed by ``bevel mcp list`` -- a server that
+    #: silently vanished from the list is indistinguishable from a typo.
+    enabled: bool = True
+    timeout: float = DEFAULT_MCP_TIMEOUT
+
+
 class ConfigError(Exception):
     """Configuration is present but unusable.
 
@@ -132,6 +167,9 @@ class Config:
     sources: tuple[Path, ...] = ()
     policy: PolicyConfig = field(default_factory=PolicyConfig)
     memory: MemoryConfig = field(default_factory=MemoryConfig)
+    #: MCP servers to spawn at the start of a run, keyed by the name used as
+    #: their tool prefix.
+    mcp_servers: dict[str, McpServerConfig] = field(default_factory=dict)
 
     def profile(self, name: str | None = None) -> ProfileConfig:
         key = name or self.default_profile

@@ -8,6 +8,7 @@ loudly while naming the milestone that delivers them.
 from __future__ import annotations
 
 import asyncio
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -716,7 +717,14 @@ class TestMcp:
         return project
 
     def _fixture_table(self, name: str = "fixture", **fields: object) -> str:
-        lines = [f"[mcp.servers.{name}]", f'command = "{sys.executable}"', f'args = ["{FIXTURE}"]']
+        # ``json.dumps`` rather than an f-string: a Windows path in a TOML basic
+        # string needs its backslashes escaped, and JSON already escapes exactly
+        # the way TOML does.
+        lines = [
+            f"[mcp.servers.{name}]",
+            f"command = {json.dumps(sys.executable)}",
+            f"args = [{json.dumps(str(FIXTURE))}]",
+        ]
         lines.extend(f"{key} = {value}" for key, value in fields.items())
         return "\n".join(lines)
 

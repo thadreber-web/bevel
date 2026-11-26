@@ -12,6 +12,7 @@ may open a socket.
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
@@ -25,6 +26,7 @@ from textual.command import CommandInput, CommandPalette
 from textual.containers import VerticalScroll
 from textual.pilot import Pilot
 from textual.widgets import Static
+from textual.worker import WorkerFailed
 
 from bevel.config import loader
 from bevel.config.schema import McpServerConfig, MemoryConfig, PolicyConfig, PolicyMode
@@ -1202,10 +1204,17 @@ async def test_a_run_that_raised_still_closed_its_servers(
             yield None  # pragma: no cover - makes this an async generator
 
     monkeypatch.setattr("bevel.tui.app.Agent", ExplodingAgent)
-    async with app.run_test() as pilot:
-        await submit(pilot, "use a tool")
-        assert await settle(pilot, lambda: app._servers is not None)
-        assert await settle(pilot, lambda: app._agent is None and app._servers is not None)
+
+    # Textual re-raises a worker's exception, wrapped, when the pilot exits, so
+    # the crash has to be expected here -- the point of the test is what happened
+    # on the way out, not that the run failed.
+    async def drive() -> None:
+        async with app.run_test() as pilot:
+            await submit(pilot, "use a tool")
+            assert await settle(pilot, lambda: app._agent is None and app._servers is not None)
+
+    with pytest.raises(WorkerFailed, match="the loop blew up"):
+        await drive()
 
     pid = app._servers.reports[0].pid
     assert pid is not None
@@ -1234,6 +1243,7 @@ def test_run_tui_hands_the_configured_servers_to_the_app(
     class RecordingApp:
         def __init__(self, **kwargs: object) -> None:
             captured.update(kwargs)
+            self.__dict__.update(kwargs)
 
         async def run_async(self) -> int:
             return 0
@@ -1243,7 +1253,10 @@ def test_run_tui_hands_the_configured_servers_to_the_app(
     config_dir.mkdir(parents=True, exist_ok=True)
     (config_dir / "config.toml").write_text(
         '[profile.home]\nbase_url = "https://models.test/v1"\nmodel = "test-model"\n'
-        f"\n[mcp.servers.fixture]\ncommand = {sys.executable!r}\nargs = [{str(FIXTURE)!r}]\n",
+        # json.dumps, not repr: a Windows path needs its backslashes escaped the
+        # way TOML basic strings want them, which is exactly what JSON does.
+        f"\n[mcp.servers.fixture]\ncommand = {json.dumps(sys.executable)}"
+        f"\nargs = [{json.dumps(str(FIXTURE))}]\n",
         encoding="utf-8",
     )
 

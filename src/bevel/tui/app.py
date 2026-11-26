@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import asyncio
 import sys
+from collections.abc import Mapping
 from dataclasses import replace
 from enum import StrEnum
 from pathlib import Path
@@ -40,7 +41,7 @@ from textual.widget import Widget
 from textual.widgets import Footer, Header, Input, Static
 
 from bevel.config.loader import capability_cache_path, load, memory_db_path, session_db_path
-from bevel.config.schema import ConfigError, PolicyConfig, PolicyMode
+from bevel.config.schema import ConfigError, McpServerConfig, PolicyConfig, PolicyMode
 from bevel.core.agent import (
     UNBUILT_SEAMS,
     Agent,
@@ -56,6 +57,8 @@ from bevel.core.policy.approvals import Approval, ApprovalRequest, Approver, Dec
 from bevel.core.session.resume import ResumedSession, rebuild_transcript
 from bevel.core.session.store import SessionStore, StoredToolCall, TodoStore
 from bevel.core.tools.base import ToolResult
+from bevel.core.tools.registry import tools as builtin_tools
+from bevel.mcp.servers import McpServers, start_servers
 from bevel.providers.base import ModelProvider
 from bevel.providers.registry import Registry
 from bevel.tui.widgets.tool_cards import ToolCard
@@ -134,6 +137,7 @@ class BevelApp(App[None]):
         resume: ResumedSession | None = None,
         memory: MemoryStore | None = None,
         todos: TodoStore | None = None,
+        mcp: Mapping[str, McpServerConfig] | None = None,
     ) -> None:
         super().__init__()
         self.provider = provider
@@ -144,7 +148,13 @@ class BevelApp(App[None]):
         self.resume = resume
         self.memory = memory
         self.todos = todos
+        #: The ``[mcp.servers]`` tables this app was configured with. Servers are
+        #: started per run rather than at startup: a run that never calls a tool
+        #: should not pay for four child processes, and one that crashes must not
+        #: leave them behind.
+        self.mcp = dict(mcp) if mcp is not None else {}
         self._agent: Agent | None = None
+        self._servers: McpServers | None = None
         self._content: ContentBlock | None = None
         self._reasoning: ReasoningBlock | None = None
         self._content_chars = 0
@@ -275,23 +285,37 @@ class BevelApp(App[None]):
         self.run_worker(self._run(task), exclusive=True)
 
     async def _run(self, task: str) -> None:
-        agent = Agent(
-            self.provider,
-            self.workspace,
-            policy_config=replace(self.policy, mode=self._policy_mode()),
-            approver=self._approver(),
-            store=self.store,
-            resume=self.resume,
-            memory=self.memory,
-            todos=self.todos,
-        )
-        self._agent = agent
+        # Started here, per run, and closed in the ``finally`` below. Not at app
+        # startup: a session where the user never asks for a tool should not pay
+        # for a child process per configured server, and a run that raises must
+        # not leave one behind on their machine.
+        servers = await start_servers(self.mcp)
+        # Assigned before the ``try`` and closed inside it: there is no await
+        # between the two, so there is no point at which a cancellation could
+        # leave a started server unowned.
+        self._servers = servers
         try:
+            agent = Agent(
+                self.provider,
+                self.workspace,
+                policy_config=replace(self.policy, mode=self._policy_mode()),
+                approver=self._approver(),
+                store=self.store,
+                resume=self.resume,
+                memory=self.memory,
+                todos=self.todos,
+                # ``tools`` *replaces* the built-ins rather than extending them,
+                # so the built-ins have to be spelled out here -- bridging a
+                # server must not leave the model unable to read a file.
+                tools=[*builtin_tools(), *servers.tools],
+            )
+            self._agent = agent
             async for event in agent.stream(task):
                 self._handle(event)
         finally:
             self._agent = None
             self._end_blocks()
+            await servers.aclose()
         self._continue_from_store(agent)
 
     def _continue_from_store(self, agent: Agent) -> None:
@@ -582,6 +606,7 @@ def run_tui(workspace: Path | str | None = None, resume: str | None = None) -> i
         resume=resumed,
         memory=memory,
         todos=todos,
+        mcp=config.mcp_servers,
     )
     return asyncio.run(_close_after(app, registry))
 

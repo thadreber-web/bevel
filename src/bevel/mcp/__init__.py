@@ -1,7 +1,8 @@
 """Model Context Protocol client.
 
-What exists today is the wire, one way to carry it, and the bridge that turns a
-server's advertised tools into tools the model is offered.
+What exists today is the wire, one way to carry it, the bridge that turns a
+server's advertised tools into tools the model is offered, and the layer that
+starts configured servers and stops them again.
 :mod:`bevel.mcp.jsonrpc` is the JSON-RPC 2.0 core (m10a): request, notification
 and response envelopes, id allocation, the spec's error codes, and
 request/response pairing over an abstract
@@ -51,12 +52,27 @@ instead of the iteration aborting. Bridged tools are injected via
 ``Agent(tools=...)`` and are never registered in ``core/tools/registry.py``, which
 stays the source of truth for built-ins only.
 
+:mod:`bevel.mcp.servers` is m10d, the seam between configuration and the wire.
+:func:`~bevel.mcp.servers.start_servers` takes the ``[mcp.servers.<name>]``
+tables the loader produced and owns everything about them from there: it spawns
+each enabled server by argv, handshakes it, bridges it, and hands back
+:attr:`~bevel.mcp.servers.McpServers.tools` to pass to ``Agent(tools=...)`` plus
+one :class:`~bevel.mcp.servers.ServerReport` per configured server. Two rules
+make it a module rather than a loop. A server that cannot start is *data*: its
+report says so, quoting the transport's own message with the stage that failed
+and the tail of the server's stderr, and the other servers still come up -- a
+typo in one of four tables must not refuse the run. And
+:meth:`~bevel.mcp.servers.McpServers.aclose` is total and idempotent, because
+these are the caller's own children and a leak is a leaked process tree.
+``env`` is merged into the parent environment rather than replacing it, one
+``timeout`` covers all three phases, and a name two servers both sanitise to is
+refused naming both rather than let config order decide which the model sees.
+The TUI starts servers per run and closes them in a ``finally``; ``bevel mcp
+list`` starts them, prints the reports, and closes them again, and never prints
+an ``env`` value.
+
 What does not exist yet, and the slice that delivers each:
 
-config and ``bevel mcp``
-    m10d -- ``[mcp.servers.<name>]`` and ``bevel mcp list``. This is the slice
-    that removes ``"mcp"`` from ``_PENDING`` in ``cli.py``; until then
-    ``bevel mcp`` exits non-zero and says so, which is what it still does.
 ``http.py``
     m10e -- streamable-HTTP transport, session ids and SSE. It implements the
     same two-method :class:`~bevel.mcp.jsonrpc.DuplexStream`, so the channel and

@@ -557,6 +557,7 @@ class TestMcpServersTable:
     """``[mcp.servers.<name>]``: the six keys, and nothing else."""
 
     def test_no_servers_table_means_no_servers(self, cwd: Path) -> None:
+        write(cwd / PROJECT_FILENAME, MINIMAL)
         assert load(cwd=cwd, env={}).mcp_servers == {}
 
     def test_a_server_is_read_with_every_key(self, cwd: Path) -> None:
