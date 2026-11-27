@@ -24,17 +24,14 @@ There is no database. The ref and its commit message are the metadata.
 
 from __future__ import annotations
 
-import asyncio
-import contextlib
-import os
 import re
 import tempfile
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Final
+from typing import Final
 
-from bevel.core._process import TreeKiller, close_process, uses_new_session
+from bevel.core._git import GitResult, run_git
 
 __all__ = [
     "CheckpointResult",
@@ -44,9 +41,6 @@ __all__ = [
     "restore",
     "snapshot",
 ]
-
-_GIT_TIMEOUT_SECONDS: Final[float] = 30.0
-_DRAIN_GRACE_SECONDS: Final[float] = 2.0
 
 #: Checkpoints live under this namespace so they cannot collide with a user's
 #: branch names, and ``git for-each-ref 'refs/heads/bevel/checkpoint/*'`` lists
@@ -99,13 +93,6 @@ class RestoreResult:
     removed: tuple[str, ...] = field(default=())
 
 
-@dataclass(frozen=True)
-class _GitResult:
-    code: int
-    out: str
-    err: str
-
-
 def checkpoint_ref(session: str) -> str:
     """Return the ref a session's checkpoint lives on."""
     cleaned = _SESSION_CHARS.sub("-", session).strip("-.") or "session"
@@ -119,55 +106,18 @@ async def _git(
     workspace: Path,
     args: Sequence[str],
     extra_env: dict[str, str] | None = None,
-) -> _GitResult:
+) -> GitResult:
     """Run one git command. Never raises; the caller reads ``code``.
 
-    A missing or broken git comes back as a non-zero result instead of an
+    Delegates to :func:`bevel.core._git.run_git`, the single git spawner. A
+    missing or broken git comes back as a non-zero result instead of an
     exception, so a machine without git degrades to "no checkpoint" rather than
     crashing the agent.
     """
-    argv = ["git", *args]
-    env = {**os.environ, **(extra_env or {})}
-    proc: asyncio.subprocess.Process | None = None
-    try:
-        kwargs: dict[str, Any] = {
-            "cwd": str(workspace),
-            "stdin": asyncio.subprocess.DEVNULL,
-            "stdout": asyncio.subprocess.PIPE,
-            "stderr": asyncio.subprocess.PIPE,
-            "env": env,
-        }
-        if uses_new_session():
-            kwargs["start_new_session"] = True
-        proc = await asyncio.create_subprocess_exec(*argv, **kwargs)
-    except (OSError, ValueError, RuntimeError) as exc:
-        return _GitResult(127, "", f"cannot run git: {exc}")
-
-    killer = TreeKiller(proc.pid)
-    try:
-        try:
-            raw_out, raw_err = await asyncio.wait_for(
-                proc.communicate(), timeout=_GIT_TIMEOUT_SECONDS
-            )
-        except TimeoutError:
-            killer.kill()
-            with contextlib.suppress(TimeoutError, OSError):
-                await asyncio.wait_for(proc.communicate(), timeout=_DRAIN_GRACE_SECONDS)
-            return _GitResult(124, "", f"git {' '.join(args)} timed out")
-        return _GitResult(
-            proc.returncode if proc.returncode is not None else 124,
-            raw_out.decode("utf-8", "replace"),
-            raw_err.decode("utf-8", "replace"),
-        )
-    except asyncio.CancelledError:
-        killer.kill()
-        raise
-    finally:
-        killer.close()
-        close_process(proc)
+    return await run_git(workspace, args, extra_env=extra_env)
 
 
-def _reason(res: _GitResult) -> str:
+def _reason(res: GitResult) -> str:
     stripped = res.err.strip()
     return stripped.splitlines()[0] if stripped else "no output"
 

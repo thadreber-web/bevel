@@ -36,10 +36,10 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from bevel.config.schema import MemoryConfig
-from bevel.core._process import TreeKiller, close_process, uses_new_session
+from bevel.core._git import run_git
 
 if TYPE_CHECKING:
     from bevel.providers.base import ModelProvider
@@ -392,40 +392,19 @@ async def _origin_url(workspace: Path) -> str | None:
     """``git config --get remote.origin.url``, or ``None``.
 
     Never raises: no git, no repository, and no origin all mean "fall back to
-    the path", not "memory is broken". Runs as a real async subprocess rather
-    than a blocking ``subprocess.run``, because recall is called while the TUI
-    is live and the loop must never wait on a child process.
+    the path", not "memory is broken". Goes through the shared git runner
+    (:mod:`bevel.core._git`), which is a real async subprocess rather than a
+    blocking ``subprocess.run``, because recall is called while the TUI is live
+    and the loop must never wait on a child process.
     """
-    argv = ["git", "-C", str(workspace), "config", "--get", "remote.origin.url"]
-    kwargs: dict[str, Any] = {
-        "stdin": asyncio.subprocess.DEVNULL,
-        "stdout": asyncio.subprocess.PIPE,
-        "stderr": asyncio.subprocess.DEVNULL,
-    }
-    if uses_new_session():
-        kwargs["start_new_session"] = True
-    try:
-        proc = await asyncio.create_subprocess_exec(*argv, **kwargs)
-    except (OSError, ValueError, RuntimeError):
+    res = await run_git(
+        workspace,
+        ["config", "--get", "remote.origin.url"],
+        timeout_seconds=_GIT_TIMEOUT_SECONDS,
+    )
+    if res.code != 0:
         return None
-
-    killer = TreeKiller(proc.pid)
-    try:
-        try:
-            raw, _ = await asyncio.wait_for(proc.communicate(), timeout=_GIT_TIMEOUT_SECONDS)
-        except TimeoutError:
-            killer.kill()
-            return None
-    except asyncio.CancelledError:
-        killer.kill()
-        raise
-    finally:
-        killer.close()
-        close_process(proc)
-    if proc.returncode != 0:
-        return None
-    url = raw.decode("utf-8", "replace").strip()
-    return url or None
+    return res.out.strip() or None
 
 
 def _normalise_remote(url: str) -> str:
