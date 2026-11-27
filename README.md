@@ -6,9 +6,9 @@ A terminal coding agent for model servers you already run.
 
 bevel talks to **OpenAI-compatible endpoints only** — [vLLM](https://docs.vllm.ai/) and [llama.cpp](https://github.com/ggml-org/llama.cpp)'s `llama-server`. No API keys, no per-token billing, no code leaving your network.
 
-> **Status: under construction.** Built and tested today: the scaffold, capability probing and `bevel doctor`; the provider layer; the tool layer; the agent loop; the policy engine and approvals; checkpoints; the TUI; the project map and all three levels of compaction, including the L3 handoff that carries an over-long task into a fresh context; session persistence and resume; memory and recall; the todo list; and the `git` tool (allowlisted subcommands, refused escape hatches, commits that keep your identity). Run `bevel` with no subcommand to open the TUI, `bevel resume` to reopen a session you closed, and `bevel todos` to read the plan one left behind. The loop is covered by tests run against a real vLLM endpoint, and the TUI by Textual's Pilot.
+> **Status: under construction.** Built and tested today: the scaffold, capability probing and `bevel doctor`; the provider layer; the tool layer; the agent loop; the policy engine and approvals; checkpoints; the TUI; the project map and all three levels of compaction, including the L3 handoff that carries an over-long task into a fresh context; session persistence and resume; memory and recall; the todo list; the `git` tool (allowlisted subcommands, refused escape hatches, commits that keep your identity); and PR create/update on `gh` (allowlisted argv, never pushes, auth is yours). Run `bevel` with no subcommand to open the TUI, `bevel resume` to reopen a session you closed, `bevel todos` to read the plan one left behind, and `bevel pr create` / `bevel pr update` to open or edit a PR from the current branch. The loop is covered by tests run against a real vLLM endpoint, and the TUI by Textual's Pilot.
 >
-> **Not built:** the MCP client (m10), PR create/update (m11b — the `git` tool itself shipped in m11a), every sandbox backend above the path jail (m12), and the eval harness (m13). `bevel mcp`, `bevel pr`, `bevel sandbox` and `bevel eval` exist in `--help` and exit non-zero naming that milestone rather than pretending. `bevel doctor` reports what your machine *could* enforce, which is not the same as what bevel *does* enforce — see [Why this exists](#why-this-exists). `bevel` refuses to print a friendly lie about anything that isn't built: unimplemented subcommands name the milestone that delivers them, and the loop reports the seams it does not implement instead of letting you assume they exist — a list that is empty right now, and pinned empty by tests.
+> **Not built:** the MCP client (m10), every sandbox backend above the path jail (m12), and the eval harness (m13). `bevel mcp`, `bevel sandbox` and `bevel eval` exist in `--help` and exit non-zero naming that milestone rather than pretending. `bevel doctor` reports what your machine *could* enforce, which is not the same as what bevel *does* enforce — see [Why this exists](#why-this-exists). `bevel` refuses to print a friendly lie about anything that isn't built: unimplemented subcommands name the milestone that delivers them, and the loop reports the seams it does not implement instead of letting you assume they exist — a list that is empty right now, and pinned empty by tests.
 
 ## Why this exists
 
@@ -212,7 +212,7 @@ Probing and enforcement are meant to be separate roles, which is why `_capabilit
 | ✅ | m09b todo tool |
 | ⬜ | m10 MCP client |
 | ✅ | m11a git tool — allowlisted subcommands, refused escape hatches, commit trailer |
-| ⬜ | m11b PR create/update (`gh`-backed) |
+| ✅ | m11b PR create/update (`gh`-backed) — human-only CLI, allowlisted argv, never pushes |
 | ⬜ | m12 sandbox backends |
 | ⬜ | m13 evals |
 | ⬜ | m14 docs + polish |

@@ -209,6 +209,81 @@ a checkpoint, which is the conservative direction. A read (`status`, `log`,
 repo, because they act on the whole repository regardless of cwd.
 
 
+## PR is not a tool: `gh` behind the same allowlist style
+
+m11b ships PR create/update, and it ships as **no tool at all**. `core/pr.py`
+is a module the CLI calls — `bevel pr create [base]`, `bevel pr update <n>
+[title]`, positionals only — never a model-facing `Tool`. PLAN's diagram lists
+`pr.py` under `core/tools`; this is the decision the diagram could not make,
+and it is recorded in the module docstring and pinned by a test
+(`registry.get("pr") is None`).
+
+A model-facing `pr` tool has **no honest risk tier**. `NETWORK_EGRESS` has no
+producer and the registry pins the declared tier set; `EXEC_UNSAFE` without a
+`command` argument is denied by the engine as `exec:unclassifiable`, and with
+one it would re-derive the whole argv allowlist a second time; `WRITE_OUTSIDE`
+is a filesystem label on a network write. It would always ask and usually
+refuse — the push check below means the loop cannot complete the flow without
+a human anyway. The four-pin-file cost (the registry test plus the three
+`BUILTIN_TOOLS` copies) buys nothing, so the tool does not ship. If that ever
+changes, the tier question has to be answered in `core/pr.py` first.
+
+The same refusal style as `git`: an allowlist of what is permitted, never a
+denylist of known-bad tokens. Permitted: `gh pr create` (`--title`, `--body`,
+`--base`, `--head`, `--fill`), `gh pr edit <n>` (`--title`, `--body`,
+`--ready`), and `gh auth status`. `--json url,number,title,state` is appended
+by the module, never accepted from a caller — the success report is built from
+gh's own JSON, not scraped from its prose. Refused before a child is spawned,
+each with its own test:
+
+| token | why |
+| --- | --- |
+| `api` | raw curl to GitHub — the arbitrary-escape hatch; if allowed, every refusal below is decorative |
+| `--web` | opens a browser; bevel is a terminal agent and nothing may block on a GUI |
+| `--repo` | retargets the repository — the gh analogue of `git -C`, defeating the same confinement |
+| `--dry-run` | a dry run inside bevel would be reported as a real PR; bevel never builds the token |
+| `merge` / `close` | merging and closing are human decisions |
+| `checkout` / `comment` / `review` | not PR create/update; `ready` is refused so `edit --ready` is the one spelling |
+| any other option, group, or positional shape | a surface we have not reasoned about; refused rather than guessed |
+
+No second path to GitHub exists here: no httpx call, no hand-rolled REST. The
+one place the module touches the network is spawning `gh` and letting it do
+its own job. The child gets the parent environment plus `GH_PROMPT_DISABLED=1`
+and nothing else — no model-controlled env reaches it, and the fixture reads
+the variable back out of its own process to prove it.
+
+**The five decisions**, each written in the module and pinned by a test:
+
+- **Push** — bevel never pushes. Before `create`, the module asks git —
+  through `run_git`, the one git spawner; a second private one would be a
+  defect — whether the branch exists on `origin` and whether local HEAD
+  matches, and on either mismatch refuses with the exact `git push` to run.
+  A push is a network write the policy engine cannot classify; force-push
+  stays out entirely, as m11a said.
+- **Auth** — the user's, never bevel's. Probe `gh auth status`; on failure
+  return a failure naming `gh auth login` / `GH_TOKEN` / `GITHUB_TOKEN`, the
+  git tool's missing-`user.name` shape. No code path reads, prints, or logs a
+  token value — presence only.
+- **Tool or not** — human-only CLI, for the tier reasons above.
+- **Trailer** — provenance through the commit, not the PR. `create` uses
+  `--fill`, so gh composes the body from commit messages that already carry
+  `Assisted-by: bevel`. bevel authors no PR body, never appends a line to one
+  it was handed, and never sends `--body` when the user dictated one.
+- **Update means edit** — `gh pr edit`, never `gh pr comment`: a comment is a
+  new artifact on the PR, not an update of one.
+
+**What the tests cannot prove.** The unit oracle (`tests/fixtures/gh.py`) is a
+real program spawned as a real subprocess — it parses the argv it is given,
+emits gh-shaped JSON, exits with chosen codes, records what it saw, and
+refuses non-compliant argv rather than echoing it. That proves argv
+construction, JSON parsing, exit-code mapping, timeout and tree kill, the
+refusals, and the auth probe. It cannot prove that GitHub's API accepts what
+gh sends — the fixture is not GitHub. That half is
+`tests/integration/test_live_pr.py`, gated on `BEVEL_GH_INTEGRATION` the way
+the live-endpoint tests gate on `BEVEL_BASE_URL`. The module docstring says so
+rather than leaving it for a reader to discover.
+
+
 ## `shell`: argv, not strings
 
 `command` is an **array**, never a string, and execution goes through
