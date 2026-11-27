@@ -16,12 +16,24 @@ from bevel.core.tools import registry
 from bevel.core.tools.base import RiskTier, Tool, ToolContext, call_tool
 from bevel.core.tools.schema import unsupported_keywords
 
-# The six m03 tools, plus the two memory tools m09a adds and the todo tool m09b
-# adds. Recall sits with the other read-only tools, todo with them too -- it is
-# the model's own scratch list, not something it does to the world -- and
-# remember with the writers, so the order the model sees groups by what a tool
-# does to the world.
-OFFERED_TOOLS = ["read", "grep", "glob", "recall", "todo", "write", "edit", "remember", "shell"]
+# The six m03 tools, plus the two memory tools m09a adds, the todo tool m09b
+# adds, and the git tool m11a adds. Recall sits with the other read-only tools,
+# todo with them too -- it is the model's own scratch list, not something it
+# does to the world -- and remember with the writers, so the order the model
+# sees groups by what a tool does to the world. git comes last: it is the
+# second command-tier tool, and the narrower one goes after the general one.
+OFFERED_TOOLS = [
+    "read",
+    "grep",
+    "glob",
+    "recall",
+    "todo",
+    "write",
+    "edit",
+    "remember",
+    "shell",
+    "git",
+]
 NAME_RE = re.compile(r"^[a-z][a-z0-9_]*$")
 
 
@@ -75,6 +87,19 @@ class TestToolList:
         """The memory db lives in ~/.local/share/bevel, so it is not a workspace write."""
         outside = [t.spec.name for t in registry.tools() if t.risk_tier is RiskTier.WRITE_OUTSIDE]
         assert outside == ["remember"]
+
+    def test_git_declares_exec_unsafe_rather_than_a_tier_of_its_own(self) -> None:
+        """m11a adds no tier: the declared set is the same four tiers m09a pinned.
+
+        A git tool that declared ``READ`` would skip the argv matching in
+        :meth:`PolicyEngine._evaluate_exec` and lose the built-in destructive
+        rules for free; a tool that declared ``EXEC_SAFE`` would be claiming a
+        safety only a rule can grant.
+        """
+        git = registry.get("git")
+        assert git is not None
+        assert git.risk_tier is RiskTier.EXEC_UNSAFE
+        assert git.is_parallel_safe is False
 
 
 class TestSchemas:

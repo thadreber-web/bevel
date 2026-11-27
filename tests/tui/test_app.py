@@ -1090,7 +1090,18 @@ FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "mcp_server.py"
 
 #: Copied from ``test_tools_registry.py`` so that adding a built-in fails these
 #: tests loudly instead of quietly making "the built-ins survived" vacuous.
-BUILTIN_TOOLS = ["read", "grep", "glob", "recall", "todo", "write", "edit", "remember", "shell"]
+BUILTIN_TOOLS = [
+    "read",
+    "grep",
+    "glob",
+    "recall",
+    "todo",
+    "write",
+    "edit",
+    "remember",
+    "shell",
+    "git",
+]
 
 
 def mcp_config(*flags: str) -> dict[str, McpServerConfig]:

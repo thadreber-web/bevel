@@ -103,6 +103,36 @@ class TestPendingSubcommands:
         assert all(main([command]) != 0 for command in _PENDING)
 
 
+class TestPrAfterM11a:
+    """m11a ships the ``git`` tool; it does not ship PR.
+
+    ``bevel pr`` has to keep exiting 2 with a message that is still true. The
+    string used to read "m11 (git and PR operations)", which became a lie the
+    moment git shipped -- it announced a built thing as unbuilt. These pin both
+    halves: the command is still pending, and the message no longer claims git
+    is missing.
+    """
+
+    def test_pr_is_still_a_pending_command(self) -> None:
+        assert "pr" in _PENDING
+
+    def test_pr_still_exits_two_naming_its_milestone(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        assert main(["pr"]) == 2
+        err = capsys.readouterr().err
+        assert "bevel pr: not implemented yet" in err
+        assert _PENDING["pr"] in err
+
+    def test_the_pr_message_no_longer_announces_git_as_unbuilt(self) -> None:
+        """git ships in m11a; a pending message that says otherwise is a lie."""
+        assert "git" not in _PENDING["pr"].lower()
+
+    def test_git_is_not_a_pending_command(self) -> None:
+        """The tool exists; there is nothing for a stub to announce."""
+        assert "git" not in _PENDING
+
+
 class TestSessions:
     def test_no_sessions_says_so_and_names_the_file(
         self,
