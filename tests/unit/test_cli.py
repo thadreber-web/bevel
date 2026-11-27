@@ -103,34 +103,182 @@ class TestPendingSubcommands:
         assert all(main([command]) != 0 for command in _PENDING)
 
 
-class TestPrAfterM11a:
-    """m11a ships the ``git`` tool; it does not ship PR.
+class TestPr:
+    """``bevel pr create`` / ``bevel pr update`` -- the gh-backed PR surface (m11b).
 
-    ``bevel pr`` has to keep exiting 2 with a message that is still true. The
-    string used to read "m11 (git and PR operations)", which became a lie the
-    moment git shipped -- it announced a built thing as unbuilt. These pin both
-    halves: the command is still pending, and the message no longer claims git
-    is missing.
+    These spawn ``tests/fixtures/gh.py`` for real, the way ``TestMcp`` spawns the
+    MCP fixture: the command's job is to build gh's argv and report what gh
+    answered, and a stub would print whatever it was told to. The real gh is
+    injected as the program via ``bevel.cli._GH``; bevel's own validator still
+    checks the logical argv, and the fixture refuses anything off the allowlist.
     """
 
-    def test_pr_is_still_a_pending_command(self) -> None:
-        assert "pr" in _PENDING
+    GH_FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "gh.py"
 
-    def test_pr_still_exits_two_naming_its_milestone(
+    def _inject_gh(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, **env: str) -> Path:
+        """Point the CLI at the fixture and record what it was asked to do."""
+        seen = tmp_path / "gh-seen.jsonl"
+        monkeypatch.setattr("bevel.cli._GH", (sys.executable, str(self.GH_FIXTURE)))
+        monkeypatch.setenv("BEVEL_GH_FIXTURE_SEEN", str(seen))
+        for key, value in env.items():
+            monkeypatch.setenv(key, value)
+        return seen
+
+    def _repo(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, pushed: bool = True) -> Path:
+        """A real repo on a ``feature`` branch, optionally pushed to a bare origin."""
+        import os
+
+        empty = tmp_path / "empty-gitconfig"
+        empty.write_text("", encoding="utf-8")
+        monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(empty))
+        monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+        identity = (
+            "-c",
+            "user.name=bevel",
+            "-c",
+            "user.email=bevel@localhost",
+            "-c",
+            "commit.gpgsign=false",
+        )
+
+        def git(*args: str) -> None:
+            subprocess.run(
+                ["git", *identity, *args],
+                cwd=root,
+                check=True,
+                capture_output=True,
+                env={**os.environ, "GIT_CONFIG_NOSYSTEM": "1"},
+                timeout=60,
+            )
+
+        root = tmp_path / "repo"
+        root.mkdir()
+        git("init", "-q", "-b", "main")
+        (root / "a.txt").write_text("a\n", encoding="utf-8")
+        git("add", ".")
+        git("commit", "-q", "--no-verify", "-m", "seed")
+        if pushed:
+            bare = tmp_path / "origin.git"
+            bare.mkdir()
+            subprocess.run(
+                ["git", *identity, "init", "--bare", "-q", "-b", "main"],
+                cwd=bare,
+                check=True,
+                capture_output=True,
+                env={**os.environ, "GIT_CONFIG_NOSYSTEM": "1"},
+                timeout=60,
+            )
+            git("remote", "add", "origin", str(bare))
+            git("push", "-q", "-u", "origin", "main")
+            git("remote", "set-head", "origin", "-a")
+            git("switch", "-q", "-c", "feature")
+            (root / "f.txt").write_text("f\n", encoding="utf-8")
+            git("add", ".")
+            git("commit", "-q", "--no-verify", "-m", "work")
+            git("push", "-q", "-u", "origin", "feature")
+        monkeypatch.chdir(root)
+        return root
+
+    def test_pr_is_no_longer_a_pending_command(self) -> None:
+        """The honesty rule: a command that works must not announce itself as unbuilt."""
+        assert "pr" not in _PENDING
+
+    def test_the_subcommand_takes_only_positionals(self) -> None:
+        """A ``--flag`` here would have to be read by this milestone."""
+        subparser = next(
+            action.choices["pr"]
+            for action in build_parser()._actions
+            if action.choices and "pr" in action.choices
+        )
+        options = {option for action in subparser._actions for option in action.option_strings}
+        assert options == {"-h", "--help"}
+
+    def test_no_action_is_a_usage_error_that_prints_the_actions(
         self, capsys: pytest.CaptureFixture[str]
     ) -> None:
         assert main(["pr"]) == 2
         err = capsys.readouterr().err
-        assert "bevel pr: not implemented yet" in err
-        assert _PENDING["pr"] in err
+        assert "create" in err
+        assert "update" in err
 
-    def test_the_pr_message_no_longer_announces_git_as_unbuilt(self) -> None:
-        """git ships in m11a; a pending message that says otherwise is a lie."""
-        assert "git" not in _PENDING["pr"].lower()
+    def test_an_unknown_action_is_rejected(self) -> None:
+        with pytest.raises(SystemExit) as excinfo:
+            main(["pr", "merge"])
+        assert excinfo.value.code == 2
 
-    def test_git_is_not_a_pending_command(self) -> None:
-        """The tool exists; there is nothing for a stub to announce."""
-        assert "git" not in _PENDING
+    def test_create_prints_the_pr_gh_reported(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        self._repo(tmp_path, monkeypatch)
+        self._inject_gh(tmp_path, monkeypatch)
+        assert main(["pr", "create"]) == 0
+        out = capsys.readouterr().out
+        assert "https://github.com/bevel-fixture/repo/pull/42" in out
+
+    def test_create_on_an_unpushed_branch_exits_one_naming_the_push(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        self._repo(tmp_path, monkeypatch, pushed=False)
+        seen = self._inject_gh(tmp_path, monkeypatch)
+        assert main(["pr", "create"]) == 1
+        err = capsys.readouterr().err
+        assert "git push -u origin" in err
+        assert not seen.exists(), "the refusal happens before gh is spawned"
+
+    def test_an_unauthenticated_gh_exits_one_naming_the_fix(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        self._repo(tmp_path, monkeypatch)
+        self._inject_gh(tmp_path, monkeypatch, BEVEL_GH_FIXTURE_MODE="unauthenticated")
+        assert main(["pr", "create"]) == 1
+        err = capsys.readouterr().err
+        assert "gh auth login" in err
+
+    def test_update_prints_the_pr_gh_reported(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        self._repo(tmp_path, monkeypatch)
+        self._inject_gh(tmp_path, monkeypatch)
+        assert main(["pr", "update", "7", "A new title"]) == 0
+        out = capsys.readouterr().out
+        assert "#7" in out
+        assert "https://github.com/bevel-fixture/repo/pull/7" in out
+
+    def test_update_without_a_number_is_a_usage_error(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        self._repo(tmp_path, monkeypatch)
+        self._inject_gh(tmp_path, monkeypatch)
+        assert main(["pr", "update"]) == 2
+
+    def test_no_token_value_is_ever_printed(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """Presence-only checks: a token is not print material (same rule as mcp list)."""
+        self._repo(tmp_path, monkeypatch)
+        self._inject_gh(tmp_path, monkeypatch)
+        monkeypatch.setenv("GH_TOKEN", "ghp_hunter2_super_secret")
+        assert main(["pr", "create"]) == 0
+        captured = capsys.readouterr()
+        assert "ghp_hunter2_super_secret" not in captured.out + captured.err
 
 
 class TestSessions:
