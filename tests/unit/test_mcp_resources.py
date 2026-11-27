@@ -75,7 +75,18 @@ BLOB_URI = "bevel://fixture/blob"
 #: rendered binary into the transcript.
 BLOB_SECRET = "SECRET-BINARY-PAYLOAD"
 
-BUILTIN_TOOLS = ["read", "grep", "glob", "recall", "todo", "write", "edit", "remember", "shell"]
+BUILTIN_TOOLS = [
+    "read",
+    "grep",
+    "glob",
+    "recall",
+    "todo",
+    "write",
+    "edit",
+    "remember",
+    "shell",
+    "git",
+]
 
 
 def fixture_argv(*flags: str) -> list[str]:

@@ -1026,6 +1026,26 @@ class Agent:
             if close is not None:
                 await close()
 
+    def _mutates_filesystem(self, item: _Pending) -> bool:
+        """Whether a scheduled call is expected to change the working tree.
+
+        Two producers. A ``WRITE_WORKSPACE`` tool (write, edit) always counts.
+        The ``git`` tool counts only for a mutating subcommand — a ``commit``
+        rewrites the tree a checkpoint ref describes, so it must trigger the same
+        snapshot the first write does, but a ``status`` must not. The git tool
+        answers that itself via ``mutates()``; a tool without that method is
+        judged on its tier alone.
+        """
+        tool = item.tool
+        if tool is None:
+            return False
+        if tool.risk_tier is RiskTier.WRITE_WORKSPACE:
+            return True
+        mutates = getattr(tool, "mutates", None)
+        if callable(mutates) and item.arguments is not None:
+            return bool(mutates(item.arguments))
+        return False
+
     async def _run_tools(
         self, turn: AssistantTurn, state: _RunState, totals: _Totals
     ) -> AsyncIterator[AgentEvent]:
@@ -1053,10 +1073,7 @@ class Agent:
             self._persist(observation, state.iterations)
 
         schedulable = [item for item in pending if item.outcome is None]
-        if not self._checkpointed and any(
-            item.tool is not None and item.tool.risk_tier is RiskTier.WRITE_WORKSPACE
-            for item in schedulable
-        ):
+        if not self._checkpointed and any(self._mutates_filesystem(item) for item in schedulable):
             self._checkpointed = True
             result = await snapshot(self.ctx.workspace, self._checkpoint_session)
             if not result.ok:

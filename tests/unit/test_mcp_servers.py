@@ -43,7 +43,18 @@ FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "mcp_server.py"
 #: Copied from ``test_mcp_bridge.py`` rather than imported, so that adding a
 #: built-in fails this file loudly instead of quietly making "the built-ins
 #: survived bridging" vacuous.
-BUILTIN_TOOLS = ["read", "grep", "glob", "recall", "todo", "write", "edit", "remember", "shell"]
+BUILTIN_TOOLS = [
+    "read",
+    "grep",
+    "glob",
+    "recall",
+    "todo",
+    "write",
+    "edit",
+    "remember",
+    "shell",
+    "git",
+]
 
 
 def fixture_config(*flags: str, **overrides: Any) -> McpServerConfig:

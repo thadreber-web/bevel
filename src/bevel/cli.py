@@ -30,7 +30,7 @@ if TYPE_CHECKING:
 #: that delivers them. Kept in one place so ``--help`` and the stub message
 #: cannot drift apart.
 _PENDING: dict[str, str] = {
-    "pr": "m11 (git and PR operations)",
+    "pr": "m11b (PR create/update via gh)",
     "sandbox": "m12 (sandbox backends)",
     "eval": "m13 (eval harness)",
 }

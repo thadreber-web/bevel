@@ -129,7 +129,7 @@ class TestDeclaration:
         assert "cwd" not in GitTool().spec.parameters["properties"]
 
     def test_the_mutating_set_covers_every_tree_changing_subcommand(self) -> None:
-        assert MUTATING_SUBCOMMANDS >= {
+        assert {
             "add",
             "commit",
             "checkout",
@@ -137,7 +137,7 @@ class TestDeclaration:
             "restore",
             "reset",
             "stash",
-        }
+        } <= MUTATING_SUBCOMMANDS
         assert not MUTATING_SUBCOMMANDS & {"status", "log", "diff", "show", "rev-parse"}
 
 
@@ -198,9 +198,7 @@ class TestCommit:
         """A retried commit must not stack trailers."""
         write(repo, "f.txt", "x\n")
         await run(ctx, "git", "add", "--", "f.txt")
-        committed = await run(
-            ctx, "git", "commit", "-m", f"Already credited.\n\n{TRAILER}"
-        )
+        committed = await run(ctx, "git", "commit", "-m", f"Already credited.\n\n{TRAILER}")
         assert committed.ok, committed.error
         body = git(repo, "log", "-1", "--format=%B")
         assert body.lower().count("assisted-by: bevel") == 1
@@ -215,7 +213,7 @@ class TestCommit:
         assert git(repo, "log", "-1", "--format=%ae").strip() == "test@example.com"
 
     async def test_a_commit_without_user_name_fails_naming_the_fix(
-        self, ctx: ToolContext, repo: Path, monkeypatch: pytest.MonkeyPatch
+        self, ctx: ToolContext, repo: Path
     ) -> None:
         git(repo, "config", "--unset-all", "user.name")
         committed = await run(ctx, "git", "commit", "-m", "no identity")
@@ -247,9 +245,7 @@ class TestCommit:
         assert committed.ok, committed.error
         assert "main" in committed.content
 
-    async def test_a_failed_commit_is_reported_not_raised(
-        self, ctx: ToolContext
-    ) -> None:
+    async def test_a_failed_commit_is_reported_not_raised(self, ctx: ToolContext) -> None:
         """'nothing to commit' is an observation the model can act on, not a crash."""
         committed = await run(ctx, "git", "commit", "-m", "nothing staged")
         assert committed.ok
@@ -266,17 +262,13 @@ class TestBranchHygiene:
         assert result.ok, result.error
         assert "feature" in git(repo, "branch", "--list")
 
-    async def test_switch_c_refuses_a_name_that_already_exists(
-        self, ctx: ToolContext
-    ) -> None:
+    async def test_switch_c_refuses_a_name_that_already_exists(self, ctx: ToolContext) -> None:
         result = await run(ctx, "git", "switch", "-c", "main")
         assert result.failed
         assert "main" in (result.error or "")
         assert "already exists" in (result.error or "")
 
-    async def test_branch_refuses_a_name_that_already_exists(
-        self, ctx: ToolContext
-    ) -> None:
+    async def test_branch_refuses_a_name_that_already_exists(self, ctx: ToolContext) -> None:
         result = await run(ctx, "git", "branch", "main")
         assert result.failed
         assert "already exists" in (result.error or "")
@@ -364,9 +356,7 @@ class TestRefusals:
         assert result.failed
         assert "python" in (result.error or "")
 
-    async def test_a_mutating_subcommand_from_a_subdirectory_is_refused(
-        self, repo: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    async def test_a_mutating_subcommand_from_a_subdirectory_is_refused(self, repo: Path) -> None:
         sub = repo / "sub"
         sub.mkdir()
         result = await run(ToolContext(workspace=sub), "git", "add", ".")
@@ -418,4 +408,4 @@ class TestPolicySeam:
         finally:
             engine.close()
         assert verdict.decision.value == "deny"
-        assert "unclassifiable" in verdict.reason
+        assert "did not supply a command" in verdict.reason

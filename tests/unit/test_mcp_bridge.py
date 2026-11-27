@@ -51,7 +51,18 @@ NAME_RE = re.compile(r"^[a-z][a-z0-9_]*$")
 #: The nine built-ins, copied from ``test_tools_registry.py`` rather than
 #: imported from it, so that someone adding a built-in fails this file loudly
 #: instead of quietly making "bridging did not change the registry" vacuous.
-BUILTIN_TOOLS = ["read", "grep", "glob", "recall", "todo", "write", "edit", "remember", "shell"]
+BUILTIN_TOOLS = [
+    "read",
+    "grep",
+    "glob",
+    "recall",
+    "todo",
+    "write",
+    "edit",
+    "remember",
+    "shell",
+    "git",
+]
 
 
 def fixture_argv(*flags: str) -> list[str]:

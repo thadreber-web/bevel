@@ -19,6 +19,7 @@ from typing import Final
 
 from bevel.core.tools.base import Tool
 from bevel.core.tools.edit import EditTool
+from bevel.core.tools.git import GitTool
 from bevel.core.tools.glob import GlobTool
 from bevel.core.tools.grep import GrepTool
 from bevel.core.tools.memory import RecallTool, RememberTool
@@ -39,6 +40,9 @@ _TOOLS: Final[tuple[Tool, ...]] = (
     EditTool(),
     RememberTool(),
     ShellTool(),
+    # git last: the second command-tier tool, and the narrower one goes after
+    # the general one so the model reads "run anything" before "run git, safely".
+    GitTool(),
 )
 
 _BY_NAME: Final[dict[str, Tool]] = {tool.spec.name: tool for tool in _TOOLS}

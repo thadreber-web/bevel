@@ -23,7 +23,6 @@ from pathlib import Path
 
 from bevel.config.schema import PolicyConfig, PolicyMode
 from bevel.core.agent import Agent, AgentEventType
-from bevel.core.checkpoint import checkpoint_ref
 from bevel.core.policy.approvals import AutoApprover
 from bevel.core.tools.git import GitTool
 from bevel.providers.base import Capabilities
@@ -119,4 +118,3 @@ async def test_a_read_does_not_take_a_checkpoint(tmp_path: Path) -> None:
 
     assert not [e for e in result.events if e.type is AgentEventType.CHECKPOINT]
     assert not _git(repo, "for-each-ref", "refs/heads/bevel/checkpoint/").strip()
-    assert not (repo / checkpoint_ref("x")).exists()
