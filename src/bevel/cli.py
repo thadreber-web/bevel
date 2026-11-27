@@ -30,10 +30,21 @@ if TYPE_CHECKING:
 #: that delivers them. Kept in one place so ``--help`` and the stub message
 #: cannot drift apart.
 _PENDING: dict[str, str] = {
-    "pr": "m11b (PR create/update via gh)",
     "sandbox": "m12 (sandbox backends)",
     "eval": "m13 (eval harness)",
 }
+
+#: What ``bevel pr`` accepts. Both actions are built (m11b), so anything else
+#: is a usage error argparse rejects with exit 2. There is no ``merge``,
+#: ``close``, or ``comment``: merging and closing are human decisions, and a
+#: comment is a new artifact on the PR rather than an update of one -- the
+#: refusals and their reasons live in :mod:`bevel.core.pr`.
+_PR_ACTIONS: tuple[str, ...] = ("create", "update")
+
+#: The gh program, behind a module constant so the tests can inject
+#: ``tests/fixtures/gh.py`` the way the MCP tests inject their fixture. The
+#: core module owns the real default; this mirrors it for the CLI's own spawn.
+_GH: tuple[str, ...] = ("gh",)
 
 #: What ``bevel mcp`` accepts. ``resources`` is m10f and shares
 #: :func:`~bevel.mcp.resources.list_resources` with the model-facing tool, so a
@@ -102,6 +113,18 @@ def build_parser() -> argparse.ArgumentParser:
         "server",
         nargs="?",
         help="server name from the [mcp.servers.<name>] table (required for 'resources')",
+    )
+    pr = subparsers.add_parser("pr", help="create or update a pull request (via gh)")
+    # Positionals only, as with `memories` and `todos`. A `--flag` here would
+    # have to be read by this milestone, and TestParser rejects an option the
+    # code does not act on -- and an option that *forwarded* to gh would be a
+    # hole in the allowlist that core/pr.py owns.
+    pr.add_argument("action", nargs="?", choices=_PR_ACTIONS, help="what to do")
+    pr.add_argument(
+        "args",
+        nargs="*",
+        metavar="ARG",
+        help="create: [base]; update: <number> [title]",
     )
     for name in _PENDING:
         subparsers.add_parser(name, help=f"(planned) {name}")
@@ -505,6 +528,38 @@ async def _collect_reports(servers: Mapping[str, McpServerConfig]) -> tuple[Serv
         await started.aclose()
 
 
+def _pr(action: str | None, args: Sequence[str], out: IO[str], err: IO[str]) -> int:
+    """``bevel pr create [base]`` / ``bevel pr update <number> [title]``.
+
+    Positionals only, and the argv surface is not here: this function picks
+    apart the positionals and hands structured values to
+    :mod:`bevel.core.pr`, which owns the allowlist and refuses before
+    spawning. Success prints what gh reported (its own JSON, not scraped
+    prose) and exits 0; a gh-side failure exits 1; a usage error exits 2.
+    """
+    from .core.pr import create_pr, update_pr  # noqa: PLC0415
+
+    if action is None:
+        err.write("bevel pr: expected an action: create, update.\n")
+        return 2
+    if action == "create":
+        if len(args) > 1:
+            err.write("bevel pr create: expected at most one argument: the base branch.\n")
+            return 2
+        result = asyncio.run(create_pr(Path.cwd(), base=args[0] if args else None, gh=_GH))
+    else:
+        if not args or len(args) > 2:
+            err.write("bevel pr update: expected <number> [title].\n")
+            return 2
+        title = args[1] if len(args) == 2 else None
+        result = asyncio.run(update_pr(Path.cwd(), args[0], title=title, gh=_GH))
+    if result.failed:
+        err.write(f"bevel pr: {result.error}\n")
+        return 1
+    out.write(f"{result.content}\n")
+    return 0
+
+
 def _resume(named: str | None) -> int:
     """Reopen a session in the TUI: a named one, or the most recent for here."""
     from .config.loader import session_db_path  # noqa: PLC0415
@@ -553,6 +608,9 @@ def main(argv: Sequence[str] | None = None) -> int:  # noqa: PLR0911 - one exit 
 
     if args.command == "mcp":
         return _mcp(args.action, args.server, sys.stdout, sys.stderr)
+
+    if args.command == "pr":
+        return _pr(args.action, args.args, sys.stdout, sys.stderr)
 
     if args.command in _PENDING:
         return _not_implemented(args.command, sys.stderr)

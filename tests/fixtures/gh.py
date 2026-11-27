@@ -145,7 +145,7 @@ def _value_after(argv: list[str], flag: str) -> str | None:
     return None
 
 
-def _pr(argv: list[str], mode: str) -> int:
+def _pr(argv: list[str], mode: str) -> int:  # noqa: PLR0911 - one return per refusal shape
     """``pr create`` / ``pr edit``. ``argv`` begins with the subcommand."""
     if not argv or argv[0] not in _PR_SUBCOMMANDS:
         name = argv[0] if argv else "(missing)"
@@ -164,9 +164,8 @@ def _pr(argv: list[str], mode: str) -> int:
             return _refuse(f"option {arg!r} is not on the allowlist")
 
     body = rest[1:] if subcommand == "edit" else rest
-    if subcommand == "edit":
-        if not rest or not rest[0].isdigit():
-            return _refuse("pr edit needs a numeric PR number as its first argument")
+    if subcommand == "edit" and (not rest or not rest[0].isdigit()):
+        return _refuse("pr edit needs a numeric PR number as its first argument")
 
     if mode == "no-branch" and subcommand == "create":
         return _err("could not determine current branch: no such branch")
@@ -178,7 +177,7 @@ def _pr(argv: list[str], mode: str) -> int:
         if mode == "grandchild":
             heartbeat = os.environ.get("BEVEL_GH_FIXTURE_HEARTBEAT")
             if heartbeat:
-                subprocess.Popen(  # noqa: S603 - fixed argv, the fixture's own script
+                subprocess.Popen(
                     [sys.executable, "-c", _HEARTBEAT_CODE, heartbeat],
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
@@ -208,9 +207,7 @@ def main() -> int:
         if argv[1:] != ["status"]:
             return _refuse("only 'auth status' is allowed")
         if mode == "unauthenticated":
-            return _err(
-                "not authenticated — run 'gh auth login', or set GH_TOKEN / GITHUB_TOKEN"
-            )
+            return _err("not authenticated — run 'gh auth login', or set GH_TOKEN / GITHUB_TOKEN")
         return _emit({"logged_in": True})
     if group == "pr":
         return _pr(argv[1:], mode)

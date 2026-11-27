@@ -34,6 +34,8 @@ import pytest
 
 from bevel.core.pr import auth_status
 
+pytestmark = [pytest.mark.integration]
+
 INTEGRATION_ENV = "BEVEL_GH_INTEGRATION"
 TRUTHY = frozenset({"1", "true", "yes", "on"})
 

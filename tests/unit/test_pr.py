@@ -44,6 +44,7 @@ from bevel.core.pr import (
     update_pr,
     validate_gh_argv,
 )
+from bevel.core.tools import registry
 
 FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "gh.py"
 FIXTURE_ARGV = [sys.executable, str(FIXTURE)]
@@ -204,8 +205,6 @@ class TestDeclaration:
         same commit, and the tier question in the module docstring has to be
         answered before the registry accepts it.
         """
-        from bevel.core.tools import registry
-
         assert registry.get("pr") is None
         assert "pr" not in [tool.spec.name for tool in registry.tools()]
 
@@ -232,7 +231,8 @@ class TestArgvSurface:
 
     def test_only_gh_may_be_spawned(self) -> None:
         refusal = validate_gh_argv(["curl", "pr", "create"])
-        assert "curl" in refusal and "gh" in refusal
+        assert "curl" in refusal
+        assert "gh" in refusal
 
     def test_gh_api_is_refused(self) -> None:
         """``gh api`` is raw curl to GitHub — the arbitrary-escape hatch."""
@@ -326,9 +326,7 @@ class TestCreateArgv:
         assert "--body" not in argv
         assert "Assisted-by" not in json.dumps(argv)
 
-    async def test_a_user_dictated_body_survives_unchanged(
-        self, repo: Path, seen: Path
-    ) -> None:
+    async def test_a_user_dictated_body_survives_unchanged(self, repo: Path, seen: Path) -> None:
         """The other half of the trailer decision: what the user wrote is verbatim.
 
         bevel appends nothing to a body it was handed -- no trailer, no footer,
@@ -362,9 +360,7 @@ class TestCreateArgv:
         for row in rows(seen):
             assert row["gh_prompt_disabled"] == "1"
 
-    async def test_the_success_report_names_the_pr_from_ghs_own_json(
-        self, repo: Path, seen: Path
-    ) -> None:
+    async def test_the_success_report_names_the_pr_from_ghs_own_json(self, repo: Path) -> None:
         result = await create_pr(repo, gh=FIXTURE_ARGV)
         assert result.ok, result.error
         assert "https://github.com/bevel-fixture/repo/pull/42" in result.content
@@ -426,9 +422,7 @@ class TestCreateRefusals:
         assert result.failed
         assert rows(seen) == []
 
-    async def test_a_dangerous_base_never_reaches_the_child(
-        self, repo: Path, seen: Path
-    ) -> None:
+    async def test_a_dangerous_base_never_reaches_the_child(self, repo: Path, seen: Path) -> None:
         """A base is user text and could be ``--web``; the gate runs on the
         assembled argv, not on the flags."""
         result = await create_pr(repo, base="--web", gh=FIXTURE_ARGV)
@@ -458,7 +452,8 @@ class TestAuth:
         result = await create_pr(repo, gh=FIXTURE_ARGV)
         assert result.failed
         assert "gh auth login" in result.error
-        assert "GH_TOKEN" in result.error and "GITHUB_TOKEN" in result.error
+        assert "GH_TOKEN" in result.error
+        assert "GITHUB_TOKEN" in result.error
         assert [row["argv"] for row in rows(seen)] == [["auth", "status"]], (
             "the probe ran, the create did not"
         )
@@ -481,7 +476,7 @@ class TestAuth:
 
 class TestGhFailureModes:
     async def test_a_gh_shaped_error_is_reported_not_swallowed(
-        self, repo: Path, seen: Path, monkeypatch: pytest.MonkeyPatch
+        self, repo: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         mode(monkeypatch, "no-branch")
         result = await create_pr(repo, gh=FIXTURE_ARGV)
@@ -489,7 +484,7 @@ class TestGhFailureModes:
         assert "no such branch" in result.error
 
     async def test_unparsable_json_is_a_named_failure_not_a_fake_success(
-        self, repo: Path, seen: Path, monkeypatch: pytest.MonkeyPatch
+        self, repo: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """A gh upgrade that reshapes its output must not read as 'PR created'."""
         mode(monkeypatch, "garbage")
@@ -498,7 +493,7 @@ class TestGhFailureModes:
         assert "json" in result.error.lower()
 
     async def test_a_hanging_gh_is_killed_by_the_timeout(
-        self, repo: Path, seen: Path, monkeypatch: pytest.MonkeyPatch
+        self, repo: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         mode(monkeypatch, "hang")
         result = await create_pr(repo, gh=FIXTURE_ARGV, timeout_seconds=HANG_TIMEOUT)
@@ -516,7 +511,9 @@ class TestGhFailureModes:
         assert result.failed
 
         deadline = time.monotonic() + 5.0
-        while time.monotonic() < deadline and not heartbeat.exists():
+        while time.monotonic() < deadline:
+            if heartbeat.exists():
+                break
             await asyncio.sleep(0.05)
         assert heartbeat.exists(), "the grandchild never started"
         pids = {int(line.split()[0]) for line in heartbeat.read_text("utf-8").split()}
@@ -547,9 +544,7 @@ class TestUpdate:
         ]
         assert "#7" in result.content
 
-    async def test_update_can_edit_the_body_and_mark_ready(
-        self, repo: Path, seen: Path
-    ) -> None:
+    async def test_update_can_edit_the_body_and_mark_ready(self, repo: Path, seen: Path) -> None:
         result = await update_pr(repo, 3, body="new body", ready=True, gh=FIXTURE_ARGV)
         assert result.ok, result.error
         argv = rows(seen)[-1]["argv"]
@@ -564,16 +559,12 @@ class TestUpdate:
         assert "number" in result.error
         assert rows(seen) == []
 
-    async def test_update_with_nothing_to_change_is_refused(
-        self, repo: Path, seen: Path
-    ) -> None:
+    async def test_update_with_nothing_to_change_is_refused(self, repo: Path, seen: Path) -> None:
         result = await update_pr(repo, 1, gh=FIXTURE_ARGV)
         assert result.failed
         assert rows(seen) == []
 
-    async def test_update_never_touches_the_push_check(
-        self, unpushed_repo: Path, seen: Path
-    ) -> None:
+    async def test_update_never_touches_the_push_check(self, unpushed_repo: Path) -> None:
         """Updating an existing PR needs no local branch state at all."""
         result = await update_pr(unpushed_repo, 1, title="t", gh=FIXTURE_ARGV)
         assert result.ok, result.error
@@ -586,7 +577,8 @@ class TestModuleHonesty:
     def test_the_docstring_says_what_the_fixture_cannot_prove(self) -> None:
         """m10e's rule: the thing that is not proven is named in the module, plainly."""
         doc = pr_module.__doc__ or ""
-        assert "GitHub" in doc and "cannot" in doc.lower()
+        assert "GitHub" in doc
+        assert "cannot" in doc.lower()
 
     def test_the_docstring_records_the_push_decision(self) -> None:
         doc = pr_module.__doc__ or ""

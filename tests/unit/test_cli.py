@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import socket
 import subprocess
 import sys
@@ -124,10 +125,10 @@ class TestPr:
             monkeypatch.setenv(key, value)
         return seen
 
-    def _repo(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, pushed: bool = True) -> Path:
+    def _repo(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, pushed: bool = True
+    ) -> Path:
         """A real repo on a ``feature`` branch, optionally pushed to a bare origin."""
-        import os
-
         empty = tmp_path / "empty-gitconfig"
         empty.write_text("", encoding="utf-8")
         monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(empty))
@@ -260,7 +261,6 @@ class TestPr:
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
-        capsys: pytest.CaptureFixture[str],
     ) -> None:
         self._repo(tmp_path, monkeypatch)
         self._inject_gh(tmp_path, monkeypatch)
