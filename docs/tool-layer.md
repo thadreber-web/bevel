@@ -53,8 +53,9 @@ allow/ask/deny from the tier plus the argv, and a tool may not self-declare
 `read`, `grep`, `glob`, `recall` and `todo` are `READ`. `write` and `edit`
 are `WRITE_WORKSPACE` and **not** parallel-safe — two concurrent writes to the
 same file lose one of them. `remember` is `WRITE_OUTSIDE` because the memory
-database lives in `~/.local/share/bevel/`, outside every workspace. `shell` is
-`EXEC_UNSAFE` and not parallel-safe.
+database lives in `~/.local/share/bevel/`, outside every workspace. `shell` and
+`git` are `EXEC_UNSAFE` and not parallel-safe — two git calls racing on the
+index is a corrupt index.
 
 `todo` being `READ` looks like a bug — it writes to SQLite — and the reason is in
 `tools/todo.py`. Nothing it does touches a workspace file, the rows are scoped to
@@ -131,7 +132,82 @@ repository scope it was learned in. Writes outside the workspace, so it always
 asks — unless `[memory] auto_accept = true`, which exempts `remember` alone. A
 contradicting memory is superseded, never deleted.
 
+**`git`** — see below.
+
 **`shell`** — see below.
+
+## `git`: an allowlist, because git is an interpreter
+
+`git` (m11a) exists for one reason `shell` cannot serve: it is **narrower than
+"any program"**. The cwd is pinned to the workspace (there is no `cwd`
+parameter), the subcommands are an allowlist, and the argv that escapes the
+workspace or executes arbitrary code is refused before anything spawns. If
+those three constraints were removed, the tool would be `shell` with extra
+steps and AGENTS.md's anti-bloat rule would delete it.
+
+The tier is `EXEC_UNSAFE` and the argv is exposed as `command` — that is not
+incidental. `PolicyEngine._draft` computes an argv *only* for tiers in
+`_EXEC_TIERS`, reading `arguments["command"]`. Declaring `EXEC_UNSAFE` with a
+`command` property is what buys, for free: the built-in destructive rules
+(`git push --force`, `git reset --hard`, `git clean -f`, `git checkout .`,
+`git restore .`, `git branch -D`, `git gc --prune`), the built-in free rules
+(`git status`/`diff`/`log`/`show`/`blame`/`branch`/`rev-parse`/`ls-files`/
+`remote`), and an ask for everything else. A `git` tool that declared `READ`
+would skip the argv matching entirely and hand the model `git reset --hard`
+for free.
+
+**The refusals are an allowlist expressed as refusals, never a denylist of
+known-bad tokens.** Refused anywhere in the argv, each with its own test:
+
+| token | why |
+| --- | --- |
+| `-C`, `--git-dir`, `--work-tree`, `--namespace` | relocate the repo — defeats the path jail, the only thing confining the model today |
+| `-c` (global position), `--exec-path` | config injection: `core.pager`/`editor`/`fsmonitor`/`sshCommand`/`gitProxy`/`askPass`/`credential.helper` all execute programs |
+| `ext::` URLs, `--upload-pack`, `--receive-pack` | remote-code surfaces — git runs a named program to move bytes |
+| `--output`, `--ext-diff`, `--textconv` | file writes and external filter programs |
+| `--no-verify` | skips the user's hooks — the user's guardrails are the user's |
+| `-F`, `--file` | commit message from a file; `-m` is the only message channel |
+| any other option before the subcommand | a global we have not reasoned about; refused rather than guessed |
+
+`git config` is not on the subcommand allowlist at all, so
+`git config --global/--system/--file` is refused as a subcommand. The one
+legitimate `-c` is `git switch -c <name>` (create branch), allowed only in
+argument position after the subcommand.
+
+**The four decisions**, each written in the module and pinned by a test:
+
+- **Trailer** — `Assisted-by: bevel` is appended as the final paragraph of
+  every commit this tool makes, and only when it is not already present, so a
+  retried commit does not stack them. It is appended, never substituted: a
+  message the user dictated survives byte-for-byte above it.
+- **Identity** — unlike the checkpoint module, which forges
+  `GIT_AUTHOR_*`/`GIT_COMMITTER_*` so a snapshot never depends on the machine,
+  this tool leaves identity entirely to the user's git config. A commit in the
+  user's own history authored by `bevel <bevel@localhost>` would be a lie about
+  who wrote it. The cost is pre-checked: a repo with no `user.name` comes back
+  as a `ToolResult.failure` naming the exact `git config` fix, not an opaque
+  non-zero exit.
+- **Branch hygiene** — the tool reports the branch a commit landed on (git's
+  own output names it) and refuses `switch -c` / `checkout -b` / `branch
+  <name>` when that name already exists. It does *not* validate names beyond
+  what git rejects, does not auto-create branches, and does not offer
+  force-push — `push` is not on the allowlist at all in m11a, and PR operations
+  are m11b.
+- **Shared runner** — the tool spawns nothing itself. It calls
+  `bevel.core._git.run_git`, the single git spawner extracted from the two
+  private ones that existed before (`checkpoint/snapshot.py::_git`,
+  `memory/store.py::_origin_url`). The extraction was behaviour-preserving,
+  with the checkpoint and memory suites as the net, and landed as its own
+  commit.
+
+**Checkpoint interaction.** A mutating subcommand (`add`, `commit`, `checkout`,
+`switch`, `restore`, `reset`, `stash`, `mv`, `rm`, `tag`) triggers the same
+session checkpoint the first `write` does — the loop asks the tool via
+`mutates(arguments)` before scheduling, so a commit that later fails still cost
+a checkpoint, which is the conservative direction. A read (`status`, `log`,
+`diff`, …) does not. Mutating calls are also refused from a subdirectory of the
+repo, because they act on the whole repository regardless of cwd.
+
 
 ## `shell`: argv, not strings
 
