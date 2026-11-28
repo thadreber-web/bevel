@@ -516,7 +516,12 @@ class TestGhFailureModes:
                 break
             await asyncio.sleep(0.05)
         assert heartbeat.exists(), "the grandchild never started"
-        pids = {int(line.split()[0]) for line in heartbeat.read_text("utf-8").split()}
+        # splitlines(), not split(): each line is "<pid> <tick>", and splitting
+        # on every whitespace turns the tick numbers into phantom pids. Tick 0
+        # then reads as alive forever (os.kill(0, 0) signals the process group)
+        # and tick 4 reads as the Windows System process -- both fail the
+        # assertion for a reason that has nothing to do with the tree kill.
+        pids = {int(line.split()[0]) for line in heartbeat.read_text("utf-8").splitlines() if line}
         assert pids
         for pid in pids:
             await wait_until_dead(pid)
