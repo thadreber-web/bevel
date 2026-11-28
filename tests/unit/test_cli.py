@@ -20,11 +20,13 @@ from pathlib import Path
 import pytest
 
 from bevel import __version__
+from bevel._capability import Capability, CapabilityReport
 from bevel.cli import _PENDING, build_parser, main
 from bevel.config import loader
 from bevel.core.checkpoint import snapshot
 from bevel.core.memory.store import MemoryStore, MemoryType
 from bevel.core.messages import Message
+from bevel.core.sandbox.base import DegradeReport, EnforcementLevel, SandboxStatus
 from bevel.core.session import store as session_store
 from bevel.core.session.store import SessionStore, Todo, TodoStatus, TodoStore
 
@@ -66,6 +68,45 @@ class TestVersion:
         assert capsys.readouterr().out.strip() == f"bevel {__version__}"
 
 
+def _canned_report() -> CapabilityReport:
+    return CapabilityReport(
+        platform="TestOS",
+        release="0",
+        machine="test",
+        python_version="3.11.0",
+        in_container=False,
+        capabilities=(Capability("bwrap", False, "test"),),
+    )
+
+
+def _degraded_status() -> SandboxStatus:
+    """The lying-install case: bwrap present, probe refused, self-test never ran."""
+    return SandboxStatus(
+        level=EnforcementLevel.POLICY_ONLY,
+        prefix=(),
+        probe_attempted=True,
+        degrade=DegradeReport(
+            reason="the bwrap probe did not complete",
+            command="/usr/bin/bwrap --ro-bind / / --unshare-user --unshare-net -- /bin/echo ok",
+            exit_code=1,
+            stderr="bwrap: setting up uid map: Permission denied",
+            fixes=(
+                "sudo apt install uidmap  (provides newuidmap/newgidmap)",
+                "AppArmor: add a userns profile for bwrap at /etc/apparmor.d/bwrap",
+            ),
+        ),
+    )
+
+
+def _bwrap_status() -> SandboxStatus:
+    return SandboxStatus(
+        level=EnforcementLevel.BWRAP,
+        prefix=("/usr/bin/bwrap", "--", "true"),
+        probe_attempted=True,
+        degrade=None,
+    )
+
+
 class TestDoctor:
     def test_doctor_exits_zero_and_reports(self, capsys: pytest.CaptureFixture[str]) -> None:
         assert main(["doctor"]) == 0
@@ -76,17 +117,69 @@ class TestDoctor:
             assert name in out
 
     def test_doctor_labels_its_own_limitation(self, capsys: pytest.CaptureFixture[str]) -> None:
-        """Static probing is not verification; the output must say so."""
-        main(["doctor"])
-        out = capsys.readouterr().out
-        assert "Static probing only" in out
+        """Static probing is not verification; the output must say so.
 
-    def test_doctor_never_claims_a_self_test_ran(self, capsys: pytest.CaptureFixture[str]) -> None:
-        """The self-test is m12. Claiming it verified anything would be a fake."""
+        Off Linux there is no runtime verification to report (m12b owns the
+        Windows decision), so the static-probing disclaimer is the whole
+        story there. On Linux the verified section below replaces it.
+        """
         main(["doctor"])
         out = capsys.readouterr().out
-        assert "verified at runtime" not in out
-        assert "bevel enforces the T0" in out
+        if sys.platform == "linux":
+            assert "sandbox enforcement" in out
+        else:
+            assert "Static probing only" in out
+
+    def test_doctor_reports_the_verified_level_when_bwrap_is_active(
+        self,
+        capsys: pytest.CaptureFixture[str],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """When the probe and self-test passed, doctor says bwrap and says kernel."""
+        monkeypatch.setattr("bevel.cli.probe", _canned_report)
+        monkeypatch.setattr("bevel.cli._sandbox_status_for_doctor", _bwrap_status)
+        assert main(["doctor"]) == 0
+        out = capsys.readouterr().out
+        lines = out.splitlines()
+        assert "sandbox: bwrap" in out
+        assert "kernel" in out
+        assert any("level" in line and "bwrap" in line for line in lines)
+        assert not any("level" in line and "policy-only" in line for line in lines)
+
+    def test_doctor_degrade_is_loud(
+        self,
+        capsys: pytest.CaptureFixture[str],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The non-negotiable part: command verbatim, exit code, stderr, named fix.
+
+        Same register as ``gh auth login`` in m11b -- an opaque degrade is the
+        silent fake this project forbids.
+        """
+        monkeypatch.setattr("bevel.cli.probe", _canned_report)
+        monkeypatch.setattr("bevel.cli._sandbox_status_for_doctor", _degraded_status)
+        assert main(["doctor"]) == 0
+        out = capsys.readouterr().out
+        lines = out.splitlines()
+        assert "sandbox: policy-only" in out
+        assert "/usr/bin/bwrap --ro-bind / / --unshare-user --unshare-net -- /bin/echo ok" in out
+        assert any("exit" in line and "1" in line for line in lines)
+        assert "setting up uid map: Permission denied" in out
+        assert "sudo apt install uidmap" in out
+        assert "/etc/apparmor.d/bwrap" in out
+
+    def test_doctor_never_claims_bwrap_without_verification(
+        self,
+        capsys: pytest.CaptureFixture[str],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The level reported is the level verified -- never the one configured."""
+        monkeypatch.setattr("bevel.cli.probe", _canned_report)
+        monkeypatch.setattr("bevel.cli._sandbox_status_for_doctor", _degraded_status)
+        main(["doctor"])
+        out = capsys.readouterr().out
+        assert not any("level" in line and "bwrap" in line for line in out.splitlines())
+        assert "bevel enforces the T0 policy jail" in out
 
 
 class TestPendingSubcommands:

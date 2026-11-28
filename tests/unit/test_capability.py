@@ -256,6 +256,100 @@ class TestProbe:
             assert report.get("seccomp").available is False
 
 
+class TestBwrapProbe:
+    """The probe RUNS bwrap. shutil.which alone is the forbidden shortcut.
+
+    On Ubuntu 24.04 *installed is not working*: the uidmap helpers and an
+    AppArmor userns profile are separate prerequisites, and each has failed
+    independently on a machine where ``bwrap`` was "installed". A probe that
+    only searches PATH reports those machines as capable, which is the lie
+    this probe exists to prevent.
+    """
+
+    def _linux(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(_capability, "_CURRENT_PLATFORM", "linux")
+
+    def test_off_linux_is_unavailable(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(_capability, "_CURRENT_PLATFORM", "win32")
+        cap = _capability._probe_bwrap()
+        assert cap.available is False
+        assert cap.detail == "not Linux"
+
+    def test_absent_bwrap_is_unavailable_not_an_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Absent and error are distinct cases; both unavailable, only one is an error."""
+        self._linux(monkeypatch)
+        monkeypatch.setattr(_capability.shutil, "which", lambda _name: None)
+        cap = _capability._probe_bwrap()
+        assert cap.available is False
+        assert cap.error is None
+        assert "not on PATH" in cap.detail
+
+    def test_installed_but_broken_is_unavailable_with_stderr(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The Spark's actual failure: bwrap on PATH, uid map refused."""
+        self._linux(monkeypatch)
+        monkeypatch.setattr(_capability.shutil, "which", lambda _name: "/usr/bin/bwrap")
+        monkeypatch.setattr(
+            _capability.bwrap,
+            "run_probe",
+            lambda _path: _capability.bwrap.ProbeResult(
+                command=("/usr/bin/bwrap", *_capability.bwrap.PROBE_ARGV),
+                exit_code=1,
+                stdout="",
+                stderr="bwrap: setting up uid map: Permission denied",
+                timed_out=False,
+                spawn_error=None,
+            ),
+        )
+        cap = _capability._probe_bwrap()
+        assert cap.available is False
+        assert "uid map" in cap.detail
+        assert cap.error is None  # the probe completed; it completed and said no
+
+    def test_probe_that_could_not_run_is_an_error(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A probe that could not execute is a different fact than one that said no."""
+        self._linux(monkeypatch)
+        monkeypatch.setattr(_capability.shutil, "which", lambda _name: "/usr/bin/bwrap")
+        monkeypatch.setattr(
+            _capability.bwrap,
+            "run_probe",
+            lambda _path: _capability.bwrap.ProbeResult(
+                command=("/usr/bin/bwrap", *_capability.bwrap.PROBE_ARGV),
+                exit_code=None,
+                stdout="",
+                stderr="",
+                timed_out=False,
+                spawn_error="PermissionError: not executable",
+            ),
+        )
+        cap = _capability._probe_bwrap()
+        assert cap.available is False
+        assert cap.error is not None
+        assert "PermissionError" in cap.error
+
+    def test_working_bwrap_is_available(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._linux(monkeypatch)
+        monkeypatch.setattr(_capability.shutil, "which", lambda _name: "/usr/bin/bwrap")
+        monkeypatch.setattr(
+            _capability.bwrap,
+            "run_probe",
+            lambda _path: _capability.bwrap.ProbeResult(
+                command=("/usr/bin/bwrap", *_capability.bwrap.PROBE_ARGV),
+                exit_code=0,
+                stdout="ok\n",
+                stderr="",
+                timed_out=False,
+                spawn_error=None,
+            ),
+        )
+        cap = _capability._probe_bwrap()
+        assert cap.available is True
+        assert cap.error is None
+
+
 class TestInContainer:
     def test_absent_cgroup_is_not_a_container(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """A probe that cannot read /proc must not claim containment, and must not raise."""

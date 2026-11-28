@@ -34,6 +34,7 @@ from bevel.core.agent import UNBUILT_SEAMS, Agent, ToolOutcome
 from bevel.core.checkpoint import snapshot
 from bevel.core.memory.store import MemoryStore, MemoryType, repo_scope
 from bevel.core.messages import Message, ToolCall
+from bevel.core.sandbox.base import DegradeReport, EnforcementLevel, SandboxStatus
 from bevel.core.session.resume import rebuild_transcript
 from bevel.core.session.store import SessionStore, TodoStore
 from bevel.core.tools.base import ToolResult
@@ -125,6 +126,94 @@ async def test_title_names_the_model_and_the_mode(make_app: Callable[..., BevelA
         assert app.title == "bevel"
         assert "mock/mock-model" in app.sub_title
         assert "plan mode" in app.sub_title
+
+
+# ---------------------------------------------------------------- sandbox badge
+
+
+def _degraded() -> SandboxStatus:
+    """The lying-install case: bwrap present, probe refused by the kernel."""
+    return SandboxStatus(
+        level=EnforcementLevel.POLICY_ONLY,
+        prefix=(),
+        probe_attempted=True,
+        degrade=DegradeReport(
+            reason="the bwrap probe did not complete",
+            command="/usr/bin/bwrap --ro-bind / / --unshare-user --unshare-net -- /bin/echo ok",
+            exit_code=1,
+            stderr="bwrap: setting up uid map: Permission denied",
+            fixes=(
+                "sudo apt install uidmap  (provides newuidmap/newgidmap)",
+                "AppArmor: add a userns profile for bwrap at /etc/apparmor.d/bwrap",
+            ),
+        ),
+    )
+
+
+def _verified() -> SandboxStatus:
+    return SandboxStatus(
+        level=EnforcementLevel.BWRAP,
+        prefix=("/usr/bin/bwrap", "--"),
+        probe_attempted=True,
+        degrade=None,
+    )
+
+
+async def test_policy_only_badge_when_bwrap_failed(tmp_path: Path, isolated_homes: None) -> None:
+    """The non-negotiable part of m12a: a degrade is never silent.
+
+    The badge must read ``sandbox: policy-only`` and the transcript must carry
+    the probe command, its exit code, its stderr, and the named fix -- the
+    same register as ``gh auth login``.
+    """
+    app = BevelApp(
+        provider=MockProvider(turns=[ScriptedTurn(content="hi")]),
+        workspace=tmp_path,
+        policy=PolicyConfig(mode=PolicyMode.AUTO, db_path=tmp_path / "policy.db"),
+        sandbox=_degraded(),
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause(0.05)
+        assert "sandbox: policy-only" in app.sub_title
+        shown = "\n".join(lines(app))
+        assert "/usr/bin/bwrap --ro-bind / / --unshare-user --unshare-net -- /bin/echo ok" in shown
+        assert "setting up uid map: Permission denied" in shown
+        assert "sudo apt install uidmap" in shown
+        assert "/etc/apparmor.d/bwrap" in shown
+
+
+async def test_bwrap_badge_when_selftest_verified(tmp_path: Path, isolated_homes: None) -> None:
+    app = BevelApp(
+        provider=MockProvider(turns=[ScriptedTurn(content="hi")]),
+        workspace=tmp_path,
+        policy=PolicyConfig(mode=PolicyMode.AUTO, db_path=tmp_path / "policy.db"),
+        sandbox=_verified(),
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause(0.05)
+        assert "sandbox: bwrap" in app.sub_title
+        assert not any("policy-only" in line for line in lines(app))
+
+
+async def test_no_badge_without_a_probe(tmp_path: Path, isolated_homes: None) -> None:
+    """Windows gets no new behavior until m12b: no probe ran, so no badge lies.
+
+    A machine where bevel never attempted the probe must not render a badge at
+    all -- ``sandbox: policy-only`` would claim a degrade that was never
+    measured, and silence about Windows is m12b's decision to make.
+    """
+    app = BevelApp(
+        provider=MockProvider(turns=[ScriptedTurn(content="hi")]),
+        workspace=tmp_path,
+        policy=PolicyConfig(mode=PolicyMode.AUTO, db_path=tmp_path / "policy.db"),
+        sandbox=SandboxStatus(
+            level=EnforcementLevel.POLICY_ONLY, prefix=(), probe_attempted=False, degrade=None
+        ),
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause(0.05)
+        assert "sandbox" not in app.sub_title
+        assert not any("sandbox" in line for line in lines(app))
 
 
 # ------------------------------------------------------------------- submission
