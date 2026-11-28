@@ -51,8 +51,8 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest]
-        # 3.11 is the floor we ship against and where the sandbox ctypes code
-        # is most likely to bite; 3.13 is what most contributors will run.
+        # 3.11 is the floor we ship against and where subprocess/sandbox edge
+        # cases are most likely to bite; 3.13 is what most contributors will run.
         python-version: ['3.11', '3.13']
     steps:
       - uses: actions/checkout@v7
@@ -60,6 +60,25 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - run: uv sync --frozen
+      # m12a: the kernel-denial tests in tests/unit/test_sandbox_bwrap.py are
+      # Linux-only and FAIL rather than skip when bwrap is missing or broken,
+      # so a green ubuntu-latest run is proof they ran and the kernel denied
+      # the write and the connect. bwrap is a distro package probed by running
+      # it (installed != working on Ubuntu 24.04: uidmap and the AppArmor
+      # userns profile both bite), which is why CI installs both explicitly.
+      - name: Install bubblewrap + uidmap (Linux sandbox tests)
+        if: matrix.os == 'ubuntu-latest'
+        run: sudo apt-get update && sudo apt-get install -y bubblewrap uidmap
+      # Ubuntu 24.04's AppArmor profile restricts unprivileged userns; bwrap
+      # --unshare-user fails without the userns grant. Guarded so the step is
+      # a no-op when AppArmor isn't loaded (it isn't on all runners).
+      - name: Grant bwrap unprivileged user namespaces (AppArmor)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          if [ -d /sys/module/apparmor ]; then
+            printf 'profile bwrap /usr/bin/bwrap flags=(unconfined) {\n  userns,\n}\n' | sudo tee /etc/apparmor.d/bwrap
+            sudo apparmor_parser -r /etc/apparmor.d/bwrap
+          fi
       # Integration tests need a real vLLM/llama.cpp endpoint and are
       # deselected by marker; they run locally with `uv run pytest -m integration`.
       - run: uv run pytest
