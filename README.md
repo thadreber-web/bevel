@@ -18,21 +18,20 @@ bevel is built around three commitments:
 
 **Your hardware is the backend.** A 70B on a DGX Spark, a quantised 14B on a laptop, a speculative-decoding `llama-server` — all first-class. Endpoints are profiles in config, and each profile records what that server actually supports (`/tokenize`, `/embeddings`, parallel tool calls, streaming) rather than assuming the intersection of everyone's servers.
 
-**Enforcement you can verify.** Sandboxing is not a permission check dressed up as security. bevel is designed around three tiers, and the UI will report the level it *verified*, not the level you asked for:
+**Enforcement you can verify.** Sandboxing is not a permission check dressed up as security. bevel is designed around two tiers, and the UI will report the level it *verified*, not the level you asked for:
 
 | Tier | Linux | Windows | Status |
 |---|---|---|---|
 | **T0** policy jail | path jail + argv rule tables (safe allowlist, destructive denylist) | same | ✅ **runs today** |
-| **T1** in-process kernel | Landlock + seccomp + rlimits via `ctypes` | AppContainer + restricted token + low IL + Job Object | ⬜ m12 — designed, not built |
-| **T2** OS container | `bwrap` | Windows Sandbox | ⬜ m12 — opt-in, not built |
+| **T1** bwrap | spawn via a `bwrap` argv prefix — kernel-enforced read-only-except-workspace, no network | none; `bevel doctor` says so and names WSL2 | ⬜ m12 — designed, not built |
 
 **What actually protects you right now is T0**: the path jail in `core/tools/base.py` and the rule tables in `core/policy/rules.py`. It is a real, tested boundary against a confused model, and it is not security against an adversarial one — symlinks, junctions, 8.3 short names and NTFS alternate data streams all have ways through a textual check, and `core/sandbox/` contains no backend yet. `bevel doctor` probes for the T1/T2 primitives and reports `best tier 1` on a capable Windows machine; that is a statement about your *kernel*, not about bevel. Until m12 ships the backends, bevel enforces T0 and nothing more.
 
-The design that m12 has to honour: T1 needs **zero installs** — pure `ctypes`, no compiled wheels, so it works on a machine you cannot apt-get on. T2 is opt-in (`--untrusted-repo`) and deliberately not the default: a 10–30 s cold start per command is unusable for an agent that runs `pytest` forty times a session, and a disposable container is the wrong shape for a tool whose job is writing real edits to real files.
+The design that m12 has to honour: T1 is `bwrap`, invoked as an argv prefix — bevel builds the arguments, the kernel does the enforcement, the same division of labour as `gh` in m11b. No hand-rolled `ctypes` syscalls: the Landlock/seccomp/AppContainer ladder this README used to describe was removed from the plan before any of it was built. `bwrap` is a user-installed distro package, joining `git` and `gh` as things bevel probes for rather than assumes — bevel itself still installs nothing. And because *installed is not working* on Ubuntu 24.04 (the `uidmap` helpers and an AppArmor `userns` profile are also required), the probe **runs** bwrap rather than searching for it, and a failed probe degrades to T0 loudly: the exact command, its stderr, and the named fix — the same register as `gh auth login`.
 
 If a self-test cannot *prove* a tier denies what it claims to deny, bevel drops to the tier it can prove and says so in the UI. That self-test is itself an m12 deliverable — there is no `selftest.py` to run today.
 
-**Three runtime dependencies.** `textual`, `httpx`, `pygments`. All pure Python. `uv tool install bevel` must work on Windows and ARM64 with no build step, so the memory store is hand-rolled on the standard library rather than pulled from PyPI — and the same rule is what the not-yet-built MCP client (m10) and sandbox bindings (m12) will have to satisfy.
+**Three runtime dependencies.** `textual`, `httpx`, `pygments`. All pure Python. `uv tool install bevel` must work on Windows and ARM64 with no build step, so the memory store is hand-rolled on the standard library rather than pulled from PyPI — and the same rule is what the not-yet-built MCP client (m10) had to satisfy. The m12 sandbox adds nothing to this list either: it shells out to `bwrap`, a user-installed package, the way the git and PR surfaces shell out to `git` and `gh`.
 
 ## Install
 
