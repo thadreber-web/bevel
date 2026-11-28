@@ -69,7 +69,7 @@ Before considering any change done: `ruff check`, `mypy`, and `pytest` all green
 | `numpy` / a vector DB | SQLite FTS5 from stdlib + brute-force `float32` cosine over server `/embeddings` — ships today |
 | `rich` directly | it arrives transitively via `textual`; don't import it as a direct dependency |
 | `mcp` SDK (pulls `pydantic-core`, Rust) | *planned, m10 — `mcp/` is empty until then:* JSON-RPC over stdio + streamable-HTTP, subset only: `initialize`, `tools/list`, `tools/call`, `resources/list`, `resources/read` |
-| `python-prctl`, seccomp/AppContainer bindings | *planned, m12 — `core/sandbox/` is empty until then:* none. The m12 backend prefixes tool argv with `bwrap` (a user-installed package, probed by running it, like `git`/`gh`) — no `ctypes` syscall ladder, do not revive the deleted Landlock/seccomp/AppContainer design |
+| `python-prctl`, seccomp/AppContainer bindings | *m12a shipped — `core/sandbox/` holds the bwrap backend and self-test; m12b (Windows decision) is still open:* none. The backend prefixes tool argv with `bwrap` (a user-installed package, probed by running it, like `git`/`gh`) — no `ctypes` syscall ladder, do not revive the deleted Landlock/seccomp/AppContainer design |
 
 Dev-only tools (`pytest`, `ruff`, `mypy`, …) live in `[dependency-groups] dev` and are unconstrained.
 
@@ -86,7 +86,7 @@ src/bevel/
   core/tools/       one file per tool; declares JSON Schema + risk tier
   core/context/     compaction (L1/L2), project map (budgets live in core/agent.py)
   core/policy/      tiered engine, rules, approvals, decision log
-  core/sandbox/     empty until m12 (bwrap backend + self-test; T0 lives in tools/base.py + policy/)
+  core/sandbox/     bwrap backend (argv prefix + probe) + kernel self-test (m12a); T0 lives in tools/base.py + policy/
   core/checkpoint/  session snapshot commit on a side ref, restore API
   core/session/     SQLite: turns, tool calls, token + cost accounting
   core/memory/      FTS5 + optional vector recall

@@ -8,7 +8,7 @@ bevel talks to **OpenAI-compatible endpoints only** — [vLLM](https://docs.vllm
 
 > **Status: under construction.** Built and tested today: the scaffold, capability probing and `bevel doctor`; the provider layer; the tool layer; the agent loop; the policy engine and approvals; checkpoints; the TUI; the project map and all three levels of compaction, including the L3 handoff that carries an over-long task into a fresh context; session persistence and resume; memory and recall; the todo list; the `git` tool (allowlisted subcommands, refused escape hatches, commits that keep your identity); and PR create/update on `gh` (allowlisted argv, never pushes, auth is yours). Run `bevel` with no subcommand to open the TUI, `bevel resume` to reopen a session you closed, `bevel todos` to read the plan one left behind, and `bevel pr create` / `bevel pr update` to open or edit a PR from the current branch. The loop is covered by tests run against a real vLLM endpoint, and the TUI by Textual's Pilot.
 >
-> **Not built:** the MCP client (m10), every sandbox backend above the path jail (m12), and the eval harness (m13). `bevel mcp`, `bevel sandbox` and `bevel eval` exist in `--help` and exit non-zero naming that milestone rather than pretending. `bevel doctor` reports what your machine *could* enforce, which is not the same as what bevel *does* enforce — see [Why this exists](#why-this-exists). `bevel` refuses to print a friendly lie about anything that isn't built: unimplemented subcommands name the milestone that delivers them, and the loop reports the seams it does not implement instead of letting you assume they exist — a list that is empty right now, and pinned empty by tests.
+> **Not built:** the MCP client (m10), the Windows sandbox decision (m12b), and the eval harness (m13). `bevel mcp`, `bevel sandbox` and `bevel eval` exist in `--help` and exit non-zero naming that milestone rather than pretending. On Linux the bwrap backend (m12a) ships and `bevel doctor` reports the level it *verified* at startup; on Windows bevel still enforces only the T0 path jail and `bevel doctor` says so — see [Why this exists](#why-this-exists). `bevel` refuses to print a friendly lie about anything that isn't built: unimplemented subcommands name the milestone that delivers them, and the loop reports the seams it does not implement instead of letting you assume they exist — a list that is empty right now, and pinned empty by tests.
 
 ## Why this exists
 
@@ -23,13 +23,13 @@ bevel is built around three commitments:
 | Tier | Linux | Windows | Status |
 |---|---|---|---|
 | **T0** policy jail | path jail + argv rule tables (safe allowlist, destructive denylist) | same | ✅ **runs today** |
-| **T1** bwrap | spawn via a `bwrap` argv prefix — kernel-enforced read-only-except-workspace, no network | none; `bevel doctor` says so and names WSL2 | ⬜ m12 — designed, not built |
+| **T1** bwrap | spawn via a `bwrap` argv prefix — kernel-enforced read-only-except-workspace, no network | none; `bevel doctor` says so and names WSL2 | ✅ **runs today on Linux** (m12a) — when the probe and self-test pass; otherwise a loud degrade to T0 |
 
-**What actually protects you right now is T0**: the path jail in `core/tools/base.py` and the rule tables in `core/policy/rules.py`. It is a real, tested boundary against a confused model, and it is not security against an adversarial one — symlinks, junctions, 8.3 short names and NTFS alternate data streams all have ways through a textual check, and `core/sandbox/` contains no backend yet. `bevel doctor` probes for the T1/T2 primitives and reports `best tier 1` on a capable Windows machine; that is a statement about your *kernel*, not about bevel. Until m12 ships the backends, bevel enforces T0 and nothing more.
+**What actually protects you right now is T0**: the path jail in `core/tools/base.py` and the rule tables in `core/policy/rules.py`. It is a real, tested boundary against a confused model, and it is not security against an adversarial one — symlinks, junctions, 8.3 short names and NTFS alternate data streams all have ways through a textual check. On Linux, m12a adds T1: the shell tool spawns through a `bwrap` argv prefix and the kernel enforces it — but only when the probe and the self-test pass at startup, and the UI reports the level that was *verified*, never the one configured. `bevel doctor` probes for the primitives and reports `best tier` on a capable machine; that is a statement about your *kernel*, not about bevel. The `sandbox enforcement` section of `bevel doctor` is the part that describes bevel.
 
-The design that m12 has to honour: T1 is `bwrap`, invoked as an argv prefix — bevel builds the arguments, the kernel does the enforcement, the same division of labour as `gh` in m11b. No hand-rolled `ctypes` syscalls: the Landlock/seccomp/AppContainer ladder this README used to describe was removed from the plan before any of it was built. `bwrap` is a user-installed distro package, joining `git` and `gh` as things bevel probes for rather than assumes — bevel itself still installs nothing. And because *installed is not working* on Ubuntu 24.04 (the `uidmap` helpers and an AppArmor `userns` profile are also required), the probe **runs** bwrap rather than searching for it, and a failed probe degrades to T0 loudly: the exact command, its stderr, and the named fix — the same register as `gh auth login`.
+The design m12a honours: T1 is `bwrap`, invoked as an argv prefix — bevel builds the arguments, the kernel does the enforcement, the same division of labour as `gh` in m11b. No hand-rolled `ctypes` syscalls: the Landlock/seccomp/AppContainer ladder this README used to describe was removed from the plan before any of it was built. `bwrap` is a user-installed distro package, joining `git` and `gh` as things bevel probes for rather than assumes — bevel itself still installs nothing. And because *installed is not working* on Ubuntu 24.04 (the `uidmap` helpers and an AppArmor `userns` profile are also required), the probe **runs** bwrap rather than searching for it, and a failed probe degrades to T0 loudly: the exact command, its stderr, and the named fix — the same register as `gh auth login`.
 
-If a self-test cannot *prove* a tier denies what it claims to deny, bevel drops to the tier it can prove and says so in the UI. That self-test is itself an m12 deliverable — there is no `selftest.py` to run today.
+If a self-test cannot *prove* a tier denies what it claims to deny, bevel drops to the tier it can prove and says so in the UI. The self-test (`core/sandbox/selftest.py`) spawns a real child through the prefix and requires the **kernel** to refuse an out-of-workspace `touch` and an outbound `connect`; a probe that passed while the self-test's write succeeded is a lying probe, and the level drops to `policy-only` with the reason printed.
 
 **Three runtime dependencies.** `textual`, `httpx`, `pygments`. All pure Python. `uv tool install bevel` must work on Windows and ARM64 with no build step, so the memory store is hand-rolled on the standard library rather than pulled from PyPI — and the same rule is what the not-yet-built MCP client (m10) had to satisfy. The m12 sandbox adds nothing to this list either: it shells out to `bwrap`, a user-installed package, the way the git and PR surfaces shell out to `git` and `gh`.
 
@@ -51,7 +51,7 @@ Requires Python 3.11+.
 
 `bevel doctor` is the honest starting point — it reports what your machine is *capable of* enforcing, which is worth reading before you trust anything else this project tells you:
 
-Real output from a Windows 11 machine (the Linux columns are the same idea with Landlock and seccomp in place of AppContainer):
+Real output from a Windows 11 machine (Windows gets no sandbox probe yet — m12b makes that decision; on Linux the same command adds a verified section, shown below):
 
 ```
 bevel doctor
@@ -69,17 +69,24 @@ bevel doctor
     [no ] windows_sandbox   binaries staged but WindowsSandboxService is not installed; enable the Containers-DisposableClientVM feature
     [no ] bwrap             not Linux
 
-  Tier 2 (Windows Sandbox / bwrap) is opt-in and is not used for ordinary
-  tool calls: a 10-30s cold start per command is unusable, and the
-  container is disposable while an agent must write real edits. It is
-  enabled by config when m12 delivers the container backends.
-
-  Static probing only. No sandbox backend ships yet: bevel enforces the T0
-  policy jail, whatever 'best tier' above says. m12 adds the backends and
-  the self-test that would justify a higher number.
+  Static probing only. The rows above describe what your OS could enforce,
+  not what bevel does: bevel enforces the T0 policy jail (path jail + rule
+  engine), whatever 'best tier' above says.
 ```
 
-Read that output for what it is. It says `best tier 1`, which describes your kernel, not bevel — the self-test that would justify a higher claim is an m12 deliverable, so today nothing is verified and the only tier in force is T0.
+On Linux, where the bwrap backend can actually run, `bevel doctor` runs the probe and the self-test at startup and appends what it *verified* — this is real output from a WSL2 box where bwrap works:
+
+```
+  sandbox enforcement (verified at startup)
+    sandbox: bwrap
+    level    bwrap
+    verified by the probe and the self-test: a real child was denied
+    an out-of-workspace write and an outbound connect by the kernel.
+```
+
+When bwrap is installed but broken (the Ubuntu 24.04 `uidmap`/AppArmor case), that section instead prints the probe command verbatim, its real exit code and stderr, and the named fix — the same register as `gh auth login`. Never a silent degrade.
+
+Read the Windows output for what it is. It says `best tier 1`, which describes your kernel, not bevel — on Windows there is no runtime verification yet, so the only tier in force there is T0. On Linux the `sandbox enforcement` section is the part that describes *bevel*: it is printed only when the self-test watched a real child get denied by the kernel.
 
 Note also the `windows_sandbox` row. `WindowsSandbox.exe` is staged on capable SKUs whether or not the feature is enabled, so bevel checks for the service rather than the executable and refuses to advertise tier 2 it cannot reach.
 
@@ -148,6 +155,7 @@ Close it and the conversation is not gone: `bevel sessions` lists what is stored
 - **Agent loop** — orient → plan → act → observe, under explicit iteration, tool-call, and token budgets, with cancellation wired end-to-end: `cancel()` abandons the in-flight request *and* the tool tasks, which for the shell tool means the whole process tree. `core/agent.py` is covered by tests run against a real endpoint, and [docs/agent-loop.md](docs/agent-loop.md) explains the decisions.
 - **Tools** — read, grep, glob, recall, todo, write, edit (real diff application), remember, shell (timeouts, process-tree kill), git (allowlisted subcommands, refused repo-relocation and config-injection argv, an `Assisted-by: bevel` commit trailer, your git identity left alone). Each declares its JSON Schema and risk tier; `core/tools/registry.py` is the single source of truth for the offered list, and [docs/tool-layer.md](docs/tool-layer.md) explains the decisions.
 - **Tiered approvals** — `READ` free, `WRITE_WORKSPACE` ask, `WRITE_OUTSIDE` always ask, `EXEC_SAFE` free once allowlisted, `EXEC_UNSAFE` ask, `EXEC_DESTRUCTIVE` always ask with typed confirmation, `NETWORK_EGRESS` ask. Rules are learnable and every decision is logged with the rule that produced it. `f2` cycles plan → default → auto; auto mode still asks for `WRITE_OUTSIDE` and `EXEC_DESTRUCTIVE`, and checkpoints are taken regardless of how approvals were answered. `AutoApprover` exists for callers that want no prompts at all, but there is no CLI flag for it yet — the TUI always asks.
+- **Sandbox (Linux, m12a)** — on Linux the shell tool spawns through a `bwrap` argv prefix (`--ro-bind / /`, `--bind <workspace> <workspace>`, `--dev`, `--proc`, `--unshare-net`, `--unshare-user`, `--die-with-parent`) and the kernel enforces it: read-only except the workspace, no network. Bevel builds the argv, `bwrap` enforces — the same division of labour as `gh` in m11b, and bevel installs nothing. The level is *earned*, not requested: at startup bevel runs the probe (`bwrap --ro-bind / / --unshare-user --unshare-net -- /bin/echo ok`, because on Ubuntu 24.04 installed ≠ working) and then the self-test, which spawns a real child and requires the **kernel** to refuse an out-of-workspace `touch` and an outbound `connect`. Only when both pass does the badge read `sandbox: bwrap`. Any other outcome is `sandbox: policy-only` and the degrade is loud — the TUI and `bevel doctor` print the probe command verbatim, its exit code, its stderr, and the named fix (`sudo apt install bubblewrap`, `sudo apt install uidmap`, the AppArmor profile path). No CPU/memory caps (bwrap has none; the timeout and tree-kill are the backstop, and the module says so). Windows gets no new behavior until m12b.
 - **TUI** — `bevel` with no subcommand. A streaming transcript (markdown answers, collapsed italic reasoning), one card per tool call coloured by its outcome, a full-screen diff viewer, plan/default/auto modes, an approval dialog, and `Ctrl+C` that genuinely stops the run. Tested with Textual's Pilot against `MockProvider`.
 - **Sessions** — every turn, tool call (name, arguments, outcome, observation) and usage row is written through to SQLite as the loop goes, one commit per write, so a turn that completed survives the process. `bevel sessions` lists recent sessions with their workspace, times, turn count and token totals; `bevel resume [id]` reopens one — the transcript you see is read back from the file, and the model continues with that history. Resume trims an unusable tail (a crash between asking for calls and getting results) and says how much it dropped. The reopened transcript is verified against a real endpoint by a test that asks the model to recall a fact from the closed session.
 - **Checkpoints** — the working tree, uncommitted work-in-progress included, is committed to a `bevel/checkpoint/<session>` ref before the agent's first write, and `bevel undo` rewinds it from either the CLI or the TUI.
@@ -183,7 +191,7 @@ src/bevel/
   core/tools/       one file per tool; declares JSON Schema + risk tier
   core/context/     compaction (L1/L2) and the project map
   core/policy/      tiered engine, rules, approvals, decision log
-  core/sandbox/     empty until m12 — no backends, no self-test
+  core/sandbox/     bwrap backend (argv prefix + probe) and the kernel self-test (m12a)
   core/checkpoint/  session snapshot commit on a side ref, restore API
   core/session/     SQLite: turns, tool calls, token + cost accounting
   core/memory/      FTS5 + optional vector recall
@@ -193,7 +201,7 @@ src/bevel/
 tests/{unit,integration,tui}/   tests/evals/ is empty until m13
 ```
 
-Probing and enforcement are meant to be separate roles, which is why `_capability.py` only reads and never enforces. The other half of that separation — a `core/sandbox/` backend that only enforces, and a `selftest.py` that only verifies — is the m12 design, and neither file exists yet. Until they do, treat the enforcement level as T0 regardless of what the probes report.
+Probing and enforcement are meant to be separate roles, which is why `_capability.py` only reads and never enforces. The other half of that separation shipped in m12a: `core/sandbox/bwrap.py` builds the argv and enforces nothing itself (the kernel does), and `core/sandbox/selftest.py` only verifies — it spawns a real child and requires the kernel to deny it. On Linux the enforcement level is whatever that self-test proved; where it did not run (Windows, until m12b) or where it failed, treat the level as T0 — and `bevel doctor` and the TUI badge both say which it is.
 
 ## Build order
 
@@ -212,7 +220,8 @@ Probing and enforcement are meant to be separate roles, which is why `_capabilit
 | ⬜ | m10 MCP client |
 | ✅ | m11a git tool — allowlisted subcommands, refused escape hatches, commit trailer |
 | ✅ | m11b PR create/update (`gh`-backed) — human-only CLI, allowlisted argv, never pushes |
-| ⬜ | m12 sandbox backends |
+| 🟨 | m12a bwrap backend + self-test + doctor honesty (Linux) — probe runs bwrap, self-test proves kernel denial, loud degrade |
+| ⬜ | m12b Windows decision (T0 + WSL2 pointer) |
 | ⬜ | m13 evals |
 | ⬜ | m14 docs + polish |
 
