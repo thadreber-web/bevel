@@ -54,6 +54,8 @@ from bevel.core.checkpoint import list_checkpoints, restore
 from bevel.core.memory.store import MemoryStore
 from bevel.core.messages import ToolCall
 from bevel.core.policy.approvals import Approval, ApprovalRequest, Approver, Decision
+from bevel.core.sandbox.base import SandboxStatus
+from bevel.core.sandbox.bwrap import detect_sandbox
 from bevel.core.session.resume import ResumedSession, rebuild_transcript
 from bevel.core.session.store import SessionStore, StoredToolCall, TodoStore
 from bevel.core.tools.base import ToolResult
@@ -139,10 +141,15 @@ class BevelApp(App[None]):
         memory: MemoryStore | None = None,
         todos: TodoStore | None = None,
         mcp: Mapping[str, McpServerConfig] | None = None,
+        sandbox: SandboxStatus | None = None,
     ) -> None:
         super().__init__()
         self.provider = provider
         self.workspace = Path(workspace) if workspace is not None else Path.cwd()
+        #: The verified sandbox verdict (m12a), decided once at startup by
+        #: :func:`run_tui`. None or an unattempted probe renders no badge --
+        #: a badge is a claim about a measurement that ran.
+        self.sandbox = sandbox
         self.policy = policy if policy is not None else PolicyConfig()
         self.mode = mode
         self.store = store
@@ -172,11 +179,38 @@ class BevelApp(App[None]):
     def on_mount(self) -> None:
         self.title = "bevel"
         self._refresh_title()
+        self._show_sandbox()
         if self.resume is not None:
             self._show_resumed()
         for seam in UNBUILT_SEAMS:
             self._write(Text.assemble(("not built  ", "bold #bc8cff"), seam))
         self.query_one("#task", Input).focus()
+
+    def _show_sandbox(self) -> None:
+        """The badge, and the loud degrade when there is one.
+
+        The honesty rule: the badge reports the level the self-test
+        *verified*, never the level configured. When bwrap was unavailable
+        or failed, the badge reads ``sandbox: policy-only`` and the
+        transcript carries the probe command verbatim, its exit code, its
+        stderr, and the named fix -- the same register as ``gh auth login``.
+        A POLICY_ONLY that arrived silently is the failure this method
+        exists to prevent.
+        """
+        sandbox = self.sandbox
+        if sandbox is None or not sandbox.probe_attempted:
+            return
+        if sandbox.degrade is None:
+            return
+        degrade = sandbox.degrade
+        self._write(Text.assemble(("sandbox  ", "bold #e3b341"), degrade.reason))
+        if degrade.command is not None:
+            self._write(Text.assemble(("  probe    ", "dim"), degrade.command))
+        self._write(Text.assemble(("  exit     ", "dim"), str(degrade.exit_code)))
+        if degrade.stderr:
+            self._write(Text.assemble(("  stderr   ", "dim"), degrade.stderr))
+        for fix in degrade.fixes:
+            self._write(Text.assemble(("  fix      ", "bold #58a6ff"), fix))
 
     def _show_resumed(self) -> None:
         """Render the transcript that was read back from the store.
@@ -219,6 +253,11 @@ class BevelApp(App[None]):
 
     def _refresh_title(self) -> None:
         self.sub_title = f"{self.provider.name}/{self.provider.model} - {self.mode} mode"
+        # The badge is the verified level or nothing. A machine where no
+        # probe ran (Windows, until m12b) renders no badge: 'policy-only'
+        # would claim a degrade that was never measured.
+        if self.sandbox is not None and self.sandbox.badge is not None:
+            self.sub_title += f" - {self.sandbox.badge}"
 
     # ------------------------------------------------------------------ actions
 
@@ -305,6 +344,7 @@ class BevelApp(App[None]):
                 resume=self.resume,
                 memory=self.memory,
                 todos=self.todos,
+                sandbox=self.sandbox,
                 # ``tools`` *replaces* the built-ins rather than extending them,
                 # so the built-ins have to be spelled out here -- bridging a
                 # server must not leave the model unable to read a file. The two
@@ -593,6 +633,12 @@ def run_tui(workspace: Path | str | None = None, resume: str | None = None) -> i
     # is cheap whenever a session store exists. It shares sessions.db, and the
     # agent assigns its session id once one is open.
     todos = TodoStore(store.db_path)
+    # The sandbox verdict, decided once here at startup: the probe runs bwrap
+    # for real and the self-test watches a real child get denied. Off Linux
+    # this returns without probing (m12b owns the Windows decision). A
+    # degrade is loud from here on -- the badge and the transcript both carry
+    # it, and the Agent spawns through the prefix only when it is BWRAP.
+    sandbox = asyncio.run(detect_sandbox(Path(workspace) if workspace is not None else Path.cwd()))
     resumed: ResumedSession | None = None
     if resume is not None:
         try:
@@ -612,6 +658,7 @@ def run_tui(workspace: Path | str | None = None, resume: str | None = None) -> i
         memory=memory,
         todos=todos,
         mcp=config.mcp_servers,
+        sandbox=sandbox,
     )
     return asyncio.run(_close_after(app, registry))
 

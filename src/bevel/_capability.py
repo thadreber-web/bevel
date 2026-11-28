@@ -19,7 +19,10 @@ import platform
 import shutil
 import sys
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Final
+
+from bevel.core.sandbox import bwrap
 
 #: Windows editions that ship Windows Sandbox. Home/SingleLanguage do not.
 _SANDBOX_CAPABLE_EDITIONS: Final[frozenset[str]] = frozenset(
@@ -294,14 +297,33 @@ def _probe_bwrap() -> Capability:
     """bubblewrap is an optional enhancement, never a requirement.
 
     The user's Spark must not need any package installed for bevel to reach
-    tier 1, so bwrap is detected and used if present -- never installed.
+    its sandbox tier, so bwrap is detected and used if present -- never
+    installed.
+
+    The probe **runs** bwrap; ``shutil.which`` alone is the forbidden
+    shortcut. On Ubuntu 24.04 *installed is not working*: the ``uidmap``
+    helpers (``newuidmap``/``newgidmap``) and an AppArmor profile granting
+    ``/usr/bin/bwrap`` the ``userns`` permission are both required, and each
+    has failed independently on a machine where bwrap was "installed" --
+    both print ``setting up uid map: Permission denied``. The probe is
+    :data:`bevel.core.sandbox.bwrap.PROBE_ARGV` run through the resolved
+    path (the AppArmor grant is by path, so a copy earlier on ``PATH`` is
+    not covered by it). A probe that could not execute at all is an
+    ``error``; a probe that ran and was refused is a plain unavailable --
+    the same distinction the other probes draw.
     """
     if _CURRENT_PLATFORM != "linux":
         return Capability("bwrap", False, "not Linux")
-    path = shutil.which("bwrap")
-    if path is None:
+    found = shutil.which("bwrap")
+    if found is None:
         return Capability("bwrap", False, "bwrap not on PATH (optional)")
-    return Capability("bwrap", True, path)
+    result = bwrap.run_probe(Path(found).resolve(strict=False))
+    if result.spawn_error is not None:
+        return Capability("bwrap", False, "probe could not be executed", error=result.spawn_error)
+    if not result.passed:
+        detail = result.stderr.strip() or f"probe exited {result.exit_code}"
+        return Capability("bwrap", False, detail)
+    return Capability("bwrap", True, f"probe passed: {found}")
 
 
 def _in_container() -> bool:

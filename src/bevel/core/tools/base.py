@@ -127,6 +127,11 @@ class ToolContext:
     #: The session's todo list, or ``None`` when no session store is attached.
     #: Optional and last, for the same reason as ``memory``.
     todos: TodoStore | None = None
+    #: The bwrap argv prefix (m12a) the shell tool prepends to every spawn,
+    #: verified by the self-test at startup. Empty means POLICY_ONLY: the
+    #: spawn is unprefixed and the path jail below is the only boundary.
+    #: Optional and last, for the same reason as ``memory``.
+    sandbox_prefix: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         # Resolving here rather than per call: ``resolve()`` follows symlinks

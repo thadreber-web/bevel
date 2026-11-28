@@ -134,7 +134,7 @@ class ShellTool:
             int(arguments.get("max_output_bytes", DEFAULT_MAX_OUTPUT_BYTES)), MAX_OUTPUT_BYTES_CAP
         )
 
-        proc = await _spawn(argv, os.fspath(cwd))
+        proc = await _spawn(_spawn_argv(ctx.sandbox_prefix, argv), os.fspath(cwd))
         killer = TreeKiller(proc.pid)
         stdout = _Stream(cap=cap)
         stderr = _Stream(cap=cap)
@@ -166,6 +166,18 @@ class ShellTool:
         if not cwd.is_dir():
             raise ToolError(f"cwd is not a directory: {ctx.display(cwd)}")
         return cwd
+
+
+def _spawn_argv(prefix: tuple[str, ...], argv: list[str]) -> list[str]:
+    """The argv actually spawned: the bwrap prefix (m12a), then the command.
+
+    An empty prefix -- POLICY_ONLY, or a directly-constructed context in a
+    test -- leaves the argv byte-for-byte what the model asked for. The
+    prefix is bevel-built from the verified backend and never model-built;
+    the model's argv lands after the ``--`` separator, so it can never be
+    parsed as a bwrap option.
+    """
+    return [*prefix, *argv] if prefix else list(argv)
 
 
 async def _spawn(argv: list[str], cwd: str) -> asyncio.subprocess.Process:

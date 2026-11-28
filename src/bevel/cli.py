@@ -20,6 +20,7 @@ from . import __version__
 from ._capability import CapabilityReport, probe
 from .core.checkpoint import restore
 from .core.memory.store import MemoryStore
+from .core.sandbox.base import SandboxStatus
 from .core.session.store import SessionInfo, SessionStore, TodoStatus, TodoStore
 
 if TYPE_CHECKING:
@@ -131,7 +132,21 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _render_doctor(report: CapabilityReport) -> str:
+def _sandbox_status_for_doctor() -> SandboxStatus:
+    """The runtime verdict: run the bwrap probe + self-test against this directory.
+
+    Separate from :func:`bevel._capability.probe` on purpose: the static
+    probes answer what the OS *could* enforce, this answers what bevel
+    *verified* it does enforce. Off Linux it returns without probing
+    (m12a adds no Windows behavior; m12b owns that decision), so doctor
+    stays fast there.
+    """
+    from .core.sandbox.bwrap import detect_sandbox  # noqa: PLC0415
+
+    return asyncio.run(detect_sandbox(Path.cwd()))
+
+
+def _render_doctor(report: CapabilityReport, sandbox: SandboxStatus | None) -> str:
     lines = [
         "bevel doctor",
         "=" * 12,
@@ -147,17 +162,41 @@ def _render_doctor(report: CapabilityReport) -> str:
         mark = "yes" if cap.available else "no "
         suffix = f"  [{cap.error}]" if cap.error else ""
         lines.append(f"    [{mark}] {cap.name:<17} {cap.detail}{suffix}")
-    lines += [
-        "",
-        "  Tier 2 (Windows Sandbox / bwrap) is opt-in and is not used for ordinary",
-        "  tool calls: a 10-30s cold start per command is unusable, and the",
-        "  container is disposable while an agent must write real edits. It is",
-        "  enabled by config when m12 delivers the container backends.",
-        "",
-        "  Static probing only. No sandbox backend ships yet: bevel enforces the T0",
-        "  policy jail, whatever 'best tier' above says. m12 adds the backends and",
-        "  the self-test that would justify a higher number.",
-    ]
+    if sandbox is not None and sandbox.probe_attempted:
+        # The verified section: what the probe and self-test actually proved
+        # at startup, not what the static probes above suggest is possible.
+        lines += ["", "  sandbox enforcement (verified at startup)", f"    {sandbox.badge}"]
+        lines.append(f"    level    {sandbox.level.value}")
+        degrade = sandbox.degrade
+        if degrade is None:
+            lines += [
+                "    verified by the probe and the self-test: a real child was denied",
+                "    an out-of-workspace write and an outbound connect by the kernel.",
+            ]
+        else:
+            # The loud degrade: command verbatim, real exit code, real stderr,
+            # named fixes. The register of 'gh auth login' -- never an opaque
+            # 'sandbox: policy-only' with no explanation.
+            lines.append(f"    {degrade.reason}")
+            if degrade.command is not None:
+                lines.append(f"      command  {degrade.command}")
+            lines.append(f"      exit     {degrade.exit_code}")
+            if degrade.stderr:
+                lines.append(f"      stderr   {degrade.stderr}")
+            for fix in degrade.fixes:
+                lines.append(f"      fix      {fix}")
+            lines += [
+                "",
+                "  Until the fixes above are applied, bevel enforces the T0 policy jail",
+                "  (path jail + rule engine) and nothing more on this machine.",
+            ]
+    else:
+        lines += [
+            "",
+            "  Static probing only. The rows above describe what your OS could enforce,",
+            "  not what bevel does: bevel enforces the T0 policy jail (path jail + rule",
+            "  engine), whatever 'best tier' above says.",
+        ]
     return "\n".join(lines)
 
 
@@ -588,7 +627,7 @@ def main(argv: Sequence[str] | None = None) -> int:  # noqa: PLR0911 - one exit 
     args = parser.parse_args(argv)
 
     if args.command == "doctor":
-        sys.stdout.write(_render_doctor(probe()) + "\n")
+        sys.stdout.write(_render_doctor(probe(), _sandbox_status_for_doctor()) + "\n")
         return 0
 
     if args.command == "undo":

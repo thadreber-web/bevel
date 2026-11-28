@@ -80,6 +80,7 @@ from bevel.core.policy import (
     PolicyVerdict,
     allow_all_policy,
 )
+from bevel.core.sandbox.base import SandboxStatus
 from bevel.core.session.resume import ResumedSession
 from bevel.core.session.store import SessionStore, TodoStore
 from bevel.core.tools.base import RiskTier, Tool, ToolContext, ToolResult, call_tool
@@ -551,6 +552,7 @@ class Agent:
         resume: ResumedSession | None = None,
         memory: MemoryStore | None = None,
         todos: TodoStore | None = None,
+        sandbox: SandboxStatus | None = None,
     ) -> None:
         if budgets.max_iterations < 1:
             raise ValueError("max_iterations must be at least 1")
@@ -566,7 +568,10 @@ class Agent:
             # tagging them with *this* provider is what makes them comparable.
             memory.embedder = provider
         self._todos = todos
-        self.ctx = ToolContext(Path(workspace), memory, todos)
+        # The verified sandbox status (m12a), decided once at startup by the
+        # front end (TUI / doctor) and handed down. None means no probe ran --
+        # the shell tool spawns unprefixed, exactly as before m12a.
+        self.ctx = ToolContext(Path(workspace), memory, todos, sandbox.prefix if sandbox else ())
         self.system = system
         self.options = options
         self.budgets = budgets

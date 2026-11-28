@@ -1,23 +1,24 @@
-"""Sandbox backends -- **not implemented. This package is empty until m12.**
+"""Sandbox backends: bevel builds the argv, the kernel does the enforcing.
 
-Nothing here enforces anything. The only containment that runs today is the T0
-path jail in :mod:`bevel.core.tools.base` and the rule engine in
-:mod:`bevel.core.policy`. ``bevel doctor`` reports what your *operating system*
-could enforce, which is not what bevel does.
+m12a ships exactly one backend. The old Landlock/seccomp/AppContainer/
+Windows-Sandbox ``ctypes`` ladder was removed from the plan before any of it
+was built, and this package does not revive it: there is no tier enum with
+slots for backends that do not exist, no syscall probes, no ``.wsb`` files.
 
-The tiers below are the design m12 has to honour, not a description of this
-package:
+* :mod:`bevel.core.sandbox.base` -- the two enforcement levels that exist
+  (``POLICY_ONLY``, ``BWRAP``) and the
+  :class:`~bevel.core.sandbox.base.SandboxStatus` record the UI reports.
+* :mod:`bevel.core.sandbox.bwrap` -- the bwrap argv prefix, the probe that
+  **runs** bwrap (installed != working on Ubuntu 24.04), and the degrade
+  ladder.
+* :mod:`bevel.core.sandbox.selftest` -- the oracle: a real child denied a
+  forbidden write and a forbidden connect by a real kernel.
 
-* **T0 policy-only** -- path jail plus the rule engine. Always on. **Ships.**
-* **T1 in-process kernel** -- Linux Landlock + seccomp + rlimits; Windows
-  AppContainer + restricted token + low integrity level + Job Object.
-  Pure ``ctypes``, nothing to install.
-* **T2 OS container** -- ``bwrap`` if already present, or Windows Sandbox via a
-  generated ``.wsb``. Opt-in through ``--untrusted-repo`` only: hypervisor
-  isolation is stronger but costs a 10-30s cold start and is disposable by
-  design, which is the wrong shape for per-tool-call execution.
-
-m12 also owes the self-test that makes the UI honest: it reports the level it
-*verified* by attempting a forbidden operation and watching it get denied, never
-the level that was requested. Until then there is no such test and no badge.
+What enforces what: the T0 path jail (:mod:`bevel.core.tools.base`) and the
+rule engine (:mod:`bevel.core.policy`) are always on, both platforms. The
+bwrap backend adds kernel enforcement on Linux when the probe and self-test
+both pass; when they do not, the level is ``POLICY_ONLY`` and the reason is
+rendered loudly -- the TUI badge and ``bevel doctor`` print the probe
+command, its exit code, its stderr, and the named fix. Windows gets no new
+behavior until m12b makes the Windows decision (T0 + a WSL2 pointer).
 """
